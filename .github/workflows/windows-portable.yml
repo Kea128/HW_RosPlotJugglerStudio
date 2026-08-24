@@ -22,12 +22,12 @@ jobs:
       BUILD_DIR: ${{ github.workspace }}\build\ci-windows-ucrt64
       INSTALL_DIR: ${{ github.workspace }}\install\ci-windows-ucrt64
       RELEASE_DIR: ${{ github.workspace }}\release\ci
-      TOOLCHAIN_ROOT: ${{ runner.temp }}\msys64
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Install MSYS2 UCRT64 dependencies
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -73,7 +73,7 @@ jobs:
           ./scripts/build-windows.ps1 `
             -BuildDirectory $env:BUILD_DIR `
             -InstallDirectory $env:INSTALL_DIR `
-            -ToolchainRoot $env:TOOLCHAIN_ROOT `
+            -ToolchainRoot '${{ steps.msys2.outputs.msys2-location }}' `
             -Configuration RelWithDebInfo `
             -Jobs 2
 
@@ -88,7 +88,7 @@ jobs:
             -BuildDirectory $env:BUILD_DIR `
             -InstallDirectory $env:INSTALL_DIR `
             -ReleaseDirectory $env:RELEASE_DIR `
-            -ToolchainRoot $env:TOOLCHAIN_ROOT `
+            -ToolchainRoot '${{ steps.msys2.outputs.msys2-location }}' `
             -Channel $channel
           ./scripts/verify-release.ps1 `
             -ReleaseDirectory $env:RELEASE_DIR `
@@ -152,10 +152,10 @@ jobs:
           $beta = $version -match '(^|[.-])(beta|rc)([.-]|$)'
           "prerelease=$($beta.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
-      - name: Create draft GitHub Release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           prerelease: ${{ steps.release.outputs.prerelease }}
           generate_release_notes: true
           fail_on_unmatched_files: true

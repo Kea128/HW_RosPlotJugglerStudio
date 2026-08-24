@@ -12,15 +12,8 @@
 #include <QFontDatabase>
 #include <QSettings>
 #include <QSaveFile>
-#include <QPushButton>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QJsonDocument>
 #include <QDir>
 #include <QFileInfo>
-#include <QDialog>
-#include <QDesktopServices>
-#include <QHostInfo>
 #include <QStyleFactory>
 #include <QMessageBox>
 #include <QTimer>
@@ -159,8 +152,8 @@ int main(int argc, char* argv[])
 
   //-------------------------
 
-  QCoreApplication::setOrganizationName("PlotJuggler");
-  QCoreApplication::setApplicationName("io.plotjuggler.PlotJuggler");
+  QCoreApplication::setOrganizationName("RosPlotJugglerStudio");
+  QCoreApplication::setApplicationName("RosPlotJugglerStudio");
   QSettings::setDefaultFormat(QSettings::IniFormat);
 
   QSettings settings;
@@ -168,7 +161,7 @@ int main(int argc, char* argv[])
   if (!settings.isWritable())
   {
     qDebug() << "ERROR: the file [" << settings.fileName()
-             << "] is not writable. This may happen when you run PlotJuggler with sudo. "
+             << "] is not writable. This may happen when you run RosPlotJuggler Studio with sudo. "
                 "Change the permissions of the file (\"sudo chmod 666 <file_name>\"on "
                 "linux)";
   }
@@ -190,8 +183,7 @@ int main(int argc, char* argv[])
   //---------------------------
 
   QCommandLineParser parser;
-  parser.setApplicationDescription("PlotJuggler: the time series visualization"
-                                   " tool that you deserve ");
+  parser.setApplicationDescription("RosPlotJuggler Studio: ROS log and time-series analysis");
   parser.addVersionOption();
   parser.addHelpOption();
 
@@ -358,7 +350,7 @@ int main(int argc, char* argv[])
         QMessageBox box(window);
         box.setIcon(QMessageBox::Warning);
         box.setWindowTitle(QObject::tr("Python disabled"));
-        box.setText(QObject::tr("PlotJuggler could not initialize the embedded "
+        box.setText(QObject::tr("RosPlotJuggler Studio could not initialize the embedded "
                                 "Python interpreter."));
         box.setInformativeText(
             QObject::tr("Python custom functions are disabled for this session. Lua custom "
@@ -383,50 +375,6 @@ int main(int argc, char* argv[])
   {
     window->on_buttonStreamingStart_clicked();
   }
-
-  QNetworkAccessManager manager_message;
-  QObject::connect(
-      &manager_message, &QNetworkAccessManager::finished, [window](QNetworkReply* reply) {
-        if (reply->error())
-        {
-          qDebug() << "Telemetry reply error:" << reply->error() << reply->errorString();
-          return;
-        }
-        qDebug() << "Telemetry reply received";
-        QString answer = reply->readAll();
-        QJsonDocument document = QJsonDocument::fromJson(answer.toUtf8());
-        QJsonObject data = document.object();
-        QString message = data["message"].toString();
-        window->setStatusBarMessage(message);
-      });
-
-  // These are 100% anonymous requests; no personal data is sent.
-  // We collect your statistics to improve PlotJuggler.
-  // Create JSON payload
-  QJsonObject payload;
-  payload["user_id"] = QString::fromLatin1(QSysInfo::machineUniqueId());
-  payload["os"] = QSysInfo::productType();
-  payload["version"] = VERSION_STRING;
-  payload["installation"] = QString(PJ_INSTALLATION);
-
-  QJsonDocument doc(payload);
-  QByteArray jsonData = doc.toJson();
-
-  // Test DNS resolution first
-  QHostInfo hostInfo = QHostInfo::fromName("app.plotjuggler.io");
-  if (hostInfo.error() != QHostInfo::NoError)
-  {
-    qDebug() << "DNS lookup failed:" << hostInfo.errorString()
-             << " Addresses found:" << hostInfo.addresses();
-  }
-
-  // Create network request
-  QNetworkRequest request_message;
-  request_message.setUrl(QUrl("https://app.plotjuggler.io/telemetry"));
-  request_message.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-
-  // Send POST request
-  manager_message.post(request_message, jsonData);
 
   return app.exec();
 }

@@ -13,7 +13,6 @@
 #include <QCheckBox>
 #include <QCommandLineParser>
 #include <QDebug>
-#include <QDesktopServices>
 #include <QDirIterator>
 #include <QDomDocument>
 #include <QDoubleSpinBox>
@@ -65,7 +64,6 @@
 #include "linked_zoom_policy.h"
 
 #include "ui_aboutdialog.h"
-#include "ui_support_dialog.h"
 #include "preferences_dialog.h"
 #include "nlohmann_parsers.h"
 #include "cheatsheet/cheatsheet_dialog.h"
@@ -3293,17 +3291,6 @@ void MainWindow::onCustomPlotCreated(std::vector<CustomPlotPtr> custom_plots)
   _curvelist_widget->clearSelections();
 }
 
-void MainWindow::on_actionReportBug_triggered()
-{
-  QDesktopServices::openUrl(QUrl("https://github.com/PlotJuggler/PlotJuggler/issues"));
-}
-
-void MainWindow::on_actionShare_the_love_triggered()
-{
-  QDesktopServices::openUrl(QUrl("https://twitter.com/intent/"
-                                 "tweet?hashtags=PlotJuggler"));
-}
-
 void MainWindow::on_actionAbout_triggered()
 {
   QDialog* dialog = new QDialog(this);
@@ -3338,17 +3325,6 @@ void MainWindow::on_actionCheatsheet_triggered()
   dialog->exec();
   settings.setValue("Cheatsheet.geometry", dialog->saveGeometry());
   dialog->deleteLater();
-}
-
-void MainWindow::on_actionSupportPlotJuggler_triggered()
-{
-  QDialog* dialog = new QDialog(this);
-  auto ui = new Ui::SupportDialog();
-  ui->setupUi(dialog);
-
-  dialog->setAttribute(Qt::WA_DeleteOnClose);
-
-  dialog->exec();
 }
 
 /*

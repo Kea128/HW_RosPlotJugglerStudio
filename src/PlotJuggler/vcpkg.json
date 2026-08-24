@@ -1,0 +1,19 @@
+{
+  "name": "plotjuggler",
+  "version-string": "3.5.1",
+  "dependencies": [
+    "protobuf",
+    "mosquitto",
+    "zeromq",
+    "qt5-base",
+    "qt5-svg",
+    "qt5-websockets",
+    "qt5-serialport",
+    {
+      "name": "arrow",
+      "features": [
+        "parquet"
+      ]
+    }
+  ]
+}

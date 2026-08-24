@@ -1,0 +1,166 @@
+name: Windows portable
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-portable-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build-test-package:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      BUILD_DIR: ${{ github.workspace }}\build\ci-windows-ucrt64
+      INSTALL_DIR: ${{ github.workspace }}\install\ci-windows-ucrt64
+      RELEASE_DIR: ${{ github.workspace }}\release\ci
+      TOOLCHAIN_ROOT: ${{ runner.temp }}\msys64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install MSYS2 UCRT64 dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            git
+            make
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-gtest
+            mingw-w64-ucrt-x86_64-mosquitto
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-protobuf
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-lz4
+            mingw-w64-ucrt-x86_64-python-numpy
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-ruamel-yaml
+            mingw-w64-ucrt-x86_64-python-typing_extensions
+            mingw-w64-ucrt-x86_64-python-zstandard
+            mingw-w64-ucrt-x86_64-qt5-base
+            mingw-w64-ucrt-x86_64-qt5-serialport
+            mingw-w64-ucrt-x86_64-qt5-svg
+            mingw-w64-ucrt-x86_64-qt5-tools
+            mingw-w64-ucrt-x86_64-qt5-websockets
+            mingw-w64-ucrt-x86_64-zeromq
+
+      - name: Require tag to match STUDIO_VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/PlotJuggler/STUDIO_VERSION -Raw).Trim()
+          $expected = "v$version"
+          if ("${{ github.ref_name }}" -cne $expected) {
+            throw "Tag '${{ github.ref_name }}' must exactly equal '$expected'."
+          }
+
+      - name: Build, test, and install
+        shell: pwsh
+        run: |
+          ./scripts/build-windows.ps1 `
+            -BuildDirectory $env:BUILD_DIR `
+            -InstallDirectory $env:INSTALL_DIR `
+            -ToolchainRoot $env:TOOLCHAIN_ROOT `
+            -Configuration RelWithDebInfo `
+            -Jobs 2
+
+      - name: Package and verify tag release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/PlotJuggler/STUDIO_VERSION -Raw).Trim()
+          $channel = if ($version -match '(^|[.-])(beta|rc)([.-]|$)') { "beta" } else { "stable" }
+          ./scripts/package-portable-windows.ps1 `
+            -SkipBuild `
+            -BuildDirectory $env:BUILD_DIR `
+            -InstallDirectory $env:INSTALL_DIR `
+            -ReleaseDirectory $env:RELEASE_DIR `
+            -ToolchainRoot $env:TOOLCHAIN_ROOT `
+            -Channel $channel
+          ./scripts/verify-release.ps1 `
+            -ReleaseDirectory $env:RELEASE_DIR `
+            -PackageRoot "$env:RELEASE_DIR\portable\RosPlotJugglerStudio" `
+            -Tag "${{ github.ref_name }}"
+
+      - name: Save test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results-${{ github.run_attempt }}
+          path: |
+            build/ci-windows-ucrt64/Testing/**
+            artifacts/test/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Save release inputs
+        if: startsWith(github.ref, 'refs/tags/') && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-release
+          path: |
+            release/ci/*.zip
+            release/ci/*.zip.sha256
+            release/ci/SHA256SUMS
+            release/ci/update-manifest-*.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-test-package
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download verified release inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-portable-release
+          path: release/ci
+
+      - name: Reverify downloaded release inputs
+        shell: pwsh
+        run: |
+          ./scripts/verify-release.ps1 `
+            -ReleaseDirectory ./release/ci `
+            -Tag "${{ github.ref_name }}"
+
+      - name: Select release channel
+        id: release
+        shell: pwsh
+        run: |
+          $version = (Get-Content src/PlotJuggler/STUDIO_VERSION -Raw).Trim()
+          $beta = $version -match '(^|[.-])(beta|rc)([.-]|$)'
+          "prerelease=$($beta.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/ci/*.zip
+            release/ci/*.zip.sha256
+            release/ci/SHA256SUMS
+            release/ci/update-manifest-*.json

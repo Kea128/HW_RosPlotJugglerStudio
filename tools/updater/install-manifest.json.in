@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "product": "RosPlotJugglerStudio",
+  "version": "@PJ_STUDIO_VERSION@",
+  "platform": "windows-x86_64",
+  "entrypoint": "bin/RosPlotJugglerStudio.exe"
+}

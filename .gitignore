@@ -1,0 +1,78 @@
+# Build, staging, and release outputs
+/build/
+/install/
+/release/
+/.toolchain/
+/artifacts/
+
+# CMake/Ninja generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+install_manifest.txt
+
+# Generated binaries and debug data
+*.a
+*.dll
+*.dylib
+*.exe
+*.lib
+*.obj
+*.pdb
+*.so
+*.so.*
+
+# Runtime, logs, and test output
+*.log
+*.tmp
+*.bak
+Testing/
+test-results/
+coverage/
+.coverage
+*.gcda
+*.gcno
+
+# Locally packaged archives and checksums
+/*.zip
+/*.7z
+/*.tar
+/*.tar.gz
+/SHA256SUMS
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+credentials.json
+secrets.json
+*.p12
+*.pfx
+*.kdbx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# IDE and OS metadata
+.idea/
+.vs/
+.vscode/
+*.suo
+*.user
+*.user.*
+.DS_Store
+Thumbs.db

@@ -6,13 +6,17 @@
 
 #pragma once
 
-#include <QEvent>
+#include <QColor>
+#include <QObject>
 #include <QPointF>
+#include <QRectF>
+#include <QString>
 #include <optional>
-#include "qwt_plot_picker.h"
-#include "qwt_plot_marker.h"
+#include <vector>
 
+class QwtPlot;
 class QwtPlotCurve;
+class QwtPlotMarker;
 
 std::optional<QPointF> curvePointAt(const QwtPlotCurve* curve, double x);
 
@@ -20,17 +24,17 @@ class CurveTracker : public QObject
 {
   Q_OBJECT
 public:
-  explicit CurveTracker(QwtPlot*, QColor color);
+  explicit CurveTracker(QwtPlot*, QColor color, QString label = {}, bool prefer_right = true,
+                        std::vector<QRectF>* occupied_labels = nullptr);
 
-  ~CurveTracker();
+  ~CurveTracker() override;
 
   QPointF actualPosition() const;
 
   typedef enum
   {
     LINE_ONLY,
-    VALUE,
-    VALUE_NAME
+    VALUE
   } Parameter;
 
 public slots:
@@ -40,6 +44,8 @@ public slots:
   void setReferencePosition(std::optional<QPointF> reference_pos);
 
   void setParameter(Parameter par);
+
+  void setPrecision(int precision);
 
   void setEnabled(bool enable);
 
@@ -51,16 +57,18 @@ public slots:
   }
 
 private:
-  QPointF transform(QPoint);
-
-  QPoint invTransform(QPointF);
-
   QPointF _prev_trackerpoint;
   std::optional<QPointF> _reference_pos;
   std::vector<QwtPlotMarker*> _point_markers;
+  std::vector<QwtPlotMarker*> _value_markers;
   QwtPlotMarker* _line_marker;
-  QwtPlotMarker* _text_marker;
   QwtPlot* _plot;
+  QColor _color;
+  QString _label;
+  bool _prefer_right;
+  std::vector<QRectF>* _occupied_labels;
+  std::vector<QRectF> _local_occupied_labels;
   Parameter _param;
+  int _precision;
   bool _visible;
 };

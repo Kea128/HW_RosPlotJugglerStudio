@@ -40,6 +40,38 @@ QMainWindow {
     background: ${dark_background};
 }
 
+QFrame#rulerMetricsFrame {
+    background: ${widget_background};
+    border: 1px solid ${border_default};
+    border-radius: 6px;
+}
+
+QLabel#rulerMetricsValues {
+    background: transparent;
+    padding: 1px 4px 2px 4px;
+    font-weight: 600;
+}
+
+QTableWidget#rulerMetricsTable {
+    background: ${widget_background};
+    border: 0px;
+    alternate-background-color: ${main_background};
+    selection-background-color: ${item_selection_background};
+}
+
+QTableWidget#rulerMetricsTable::item {
+    border: 0px;
+    padding: 3px 8px;
+}
+
+QTableWidget#rulerMetricsTable QHeaderView::section {
+    background: ${main_background};
+    border: 0px;
+    border-bottom: 1px solid ${border_default};
+    padding: 3px 8px;
+    font-weight: 600;
+}
+
 QDialog {
     background: ${main_background};
 }

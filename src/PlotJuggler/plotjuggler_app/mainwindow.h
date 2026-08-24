@@ -10,6 +10,7 @@
 #include <set>
 #include <deque>
 #include <functional>
+#include <map>
 
 #include <QCommandLineParser>
 #include <QElapsedTimer>
@@ -37,6 +38,9 @@
 #include "ui_mainwindow.h"
 
 class QVBoxLayout;
+class QFrame;
+class QLabel;
+class QTableWidget;
 namespace StudioUpdate
 {
 class UpdateCoordinator;
@@ -88,6 +92,7 @@ public slots:
 
   void onTrackerTimeUpdated(double absolute_time, bool do_replot);
   void onTrackerMovedFromWidget(QPointF pos);
+  void onReferenceTrackerMovedFromWidget(QPointF pos);
   void onTimeSlider_valueChanged(double abs_time);
 
   void onPlotAdded(PlotWidget* plot);
@@ -130,6 +135,13 @@ private:
   bool _minimized;
 
   CurveListPanel* _curvelist_widget;
+  QFrame* _ruler_metrics_frame = nullptr;
+  QLabel* _ruler_metrics_values = nullptr;
+  QTableWidget* _ruler_metrics_table = nullptr;
+  QStringList _ruler_metric_curves;
+  bool _ruler_metrics_dual = false;
+  bool _ruler_metrics_update_scheduled = false;
+  QString _measurement_curve_name;
 
   PlotDataMapRef _mapped_plot_data;
 
@@ -244,6 +256,12 @@ private:
   void updateRecentLayoutMenu(QStringList new_filenames);
 
   void updatedDisplayTime();
+  void initializeRulerMetricsPanel();
+  std::map<QString, QColor> visibleNumericCurves();
+  void updateMeasurementSelection();
+  void scheduleRulerMetricsUpdate();
+  void updateRulerMetrics();
+  QString formatRulerTime(double absolute_time) const;
 
   void updateTimeSlider();
   void updateTimeOffset();
@@ -263,7 +281,6 @@ private:
 signals:
   void dataSourceRemoved(const std::string& name);
   void dataSourceUpdated(const std::string& name);
-  void activateTracker(bool active);
   void stylesheetChanged(QString style_name);
 
 public slots:
@@ -320,8 +337,6 @@ private slots:
   void on_actionColorMap_Editor_triggered();
 
   void on_buttonReloadData_clicked();
-
-  void on_buttonCloseStatus_clicked();
 
   void on_buttonReferencePoint_toggled(bool checked);
 

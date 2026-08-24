@@ -115,6 +115,7 @@ private:
 signals:
 
   void hiddenItemsChanged();
+  void selectedCurvesChanged();
 
   void createMathPlot(const std::string& linked_plot);
 

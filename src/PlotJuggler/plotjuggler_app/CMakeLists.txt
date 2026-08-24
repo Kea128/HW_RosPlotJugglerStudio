@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 qt5_add_resources(RES_SRC resource.qrc)
 
 if(WIN32)
-  set(PJ_APP_ICON_SOURCE "${PROJECT_SOURCE_DIR}/plotjuggler.ico")
+  set(PJ_APP_ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/rosplotjuggler_studio.ico")
   if(EXISTS "${PJ_APP_ICON_SOURCE}")
     file(TO_CMAKE_PATH "${PJ_APP_ICON_SOURCE}" PJ_APP_ICON)
     configure_file(plotjuggler.rc
@@ -239,10 +239,13 @@ if(BUILD_TESTING)
   find_package(GTest QUIET)
   if(GTest_FOUND)
     find_package(Qt5 REQUIRED COMPONENTS Test)
-    add_executable(test_ruler_metrics tests/test_ruler_metrics.cpp)
+    add_executable(test_ruler_metrics tests/test_ruler_metrics.cpp curve_tracker.cpp)
+    target_include_directories(test_ruler_metrics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_ruler_metrics PRIVATE
       plotjuggler_base
       Qt5::Core
+      Qt5::Widgets
+      plotjuggler_qwt
       GTest::gtest_main)
     include(GoogleTest)
     gtest_discover_tests(test_ruler_metrics)

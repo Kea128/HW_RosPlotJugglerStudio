@@ -22,6 +22,7 @@
 #include <QSettings>
 #include <QSvgGenerator>
 #include <QClipboard>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <set>
@@ -33,6 +34,7 @@
 #include "qwt_scale_engine.h"
 #include "qwt_scale_map.h"
 #include "qwt_plot_layout.h"
+#include "qwt_plot_marker.h"
 #include "qwt_scale_draw.h"
 #include "qwt_text.h"
 #include "plotwidget.h"
@@ -82,14 +84,19 @@ PlotWidget::PlotWidget(PlotDataMapRef& datamap, QWidget* parent)
   , _transform_select_dialog(nullptr)
   , _context_menu_enabled(true)
 {
-  connect(this, &PlotWidget::curveListChanged, this, [this]() { this->updateMaximumZoomArea(); });
+  connect(this, &PlotWidgetBase::curveListChanged, this, [this]() {
+    updateMaximumZoomArea();
+    refreshTrackerLabels();
+  });
 
   qwtPlot()->setAcceptDrops(true);
 
   //--------------------------
-  _tracker = (new CurveTracker(qwtPlot(), Qt::red));
-  _reference_tracker = (new CurveTracker(qwtPlot(), Qt::blue));
-  _reference_tracker->setParameter(CurveTracker::LINE_ONLY);
+  _tracker =
+      new CurveTracker(qwtPlot(), QColor("#e5484d"), "A", false, &_tracker_label_rects);
+  _reference_tracker =
+      new CurveTracker(qwtPlot(), QColor("#2563eb"), "B", true, &_tracker_label_rects);
+  _reference_tracker->setEnabled(false);
 
   _grid = new QwtPlotGrid();
   _grid->setPen(QPen(Qt::gray, 0.0, Qt::DotLine));
@@ -1018,6 +1025,7 @@ void PlotWidget::setZoomRectangle(QRectF rect, bool emit_signal)
     setAxisScale(QwtPlot::xBottom, rect.left(), rect.right());
     qwtPlot()->updateAxes();
   }
+  refreshTrackerLabels();
 
   if (emit_signal)
   {
@@ -1080,13 +1088,33 @@ void PlotWidget::activateGrid(bool activate)
 
 void PlotWidget::configureTracker(CurveTracker::Parameter val)
 {
+  const int precision = QSettings().value("Preferences::precision", 3).toInt();
   _tracker->setParameter(val);
+  _tracker->setPrecision(precision);
+  _reference_tracker->setParameter(val);
+  _reference_tracker->setPrecision(precision);
+  refreshTrackerLabels();
+}
+
+void PlotWidget::refreshTrackerLabels()
+{
+  if (isXYPlot())
+  {
+    return;
+  }
+  _tracker_label_rects.clear();
+  _tracker->redraw();
+  if (_reference_tracker_active)
+  {
+    _reference_tracker->redraw();
+  }
 }
 
 void PlotWidget::enableTracker(bool enable)
 {
   _tracker->setEnabled(enable && !isXYPlot());
-  _reference_tracker->setEnabled(enable && !isXYPlot());
+  _reference_tracker->setEnabled(enable && _reference_tracker_active && !isXYPlot());
+  refreshTrackerLabels();
 }
 
 bool PlotWidget::isTrackerEnabled() const
@@ -1113,8 +1141,24 @@ void PlotWidget::setTrackerPosition(double abs_time)
   else
   {
     double relative_time = abs_time - _time_offset;
+    _tracker_label_rects.clear();
     _tracker->setPosition(QPointF(relative_time, 0.0));
+    if (_reference_tracker_active)
+    {
+      _reference_tracker->redraw();
+    }
   }
+}
+
+void PlotWidget::setReferenceTrackerPosition(double abs_time)
+{
+  if (isXYPlot() || !_reference_tracker_active)
+  {
+    return;
+  }
+  _tracker_label_rects.clear();
+  _tracker->redraw();
+  _reference_tracker->setPosition(QPointF(abs_time - _time_offset, 0.0));
 }
 
 void PlotWidget::on_changeTimeOffset(double offset)
@@ -1124,9 +1168,15 @@ void PlotWidget::on_changeTimeOffset(double offset)
   // move the trackers
   if (!isXYPlot())
   {
+    _tracker_label_rects.clear();
     double prev_tracker = _tracker->actualPosition().x();
     double new_tracker = prev_tracker + (prev_offset - offset);
     _tracker->setPosition(QPointF(new_tracker, 0.0));
+    if (_reference_tracker_active)
+    {
+      const double reference = _reference_tracker->actualPosition().x();
+      _reference_tracker->setPosition(QPointF(reference + (prev_offset - offset), 0.0));
+    }
   }
 
   if (fabs(prev_offset - offset) > std::numeric_limits<double>::epsilon())
@@ -1331,14 +1381,17 @@ void PlotWidget::onReferenceLineChecked(bool checked, double reference_value)
   if (checked)
   {
     QPointF reference_point(reference_value - _time_offset, 0);
-    _reference_tracker->setEnabled(true);
+    _reference_tracker_active = true;
+    _reference_tracker->setEnabled(_tracker->isEnabled());
+    _tracker_label_rects.clear();
+    _tracker->redraw();
     _reference_tracker->setPosition(reference_point);
-    _tracker->setReferencePosition(reference_point);
   }
-  if (!checked)
+  else
   {
+    _reference_tracker_active = false;
     _reference_tracker->setEnabled(false);
-    _tracker->setReferencePosition(std::nullopt);
+    refreshTrackerLabels();
   }
   qwtPlot()->replot();
 }
@@ -1388,6 +1441,7 @@ void PlotWidget::onShowDataStatistics()
 
 void PlotWidget::on_externallyResized(const QRectF& rect)
 {
+  refreshTrackerLabels();
   QRectF current_rect = currentBoundingRect();
   if (current_rect == rect)
   {
@@ -1400,17 +1454,19 @@ void PlotWidget::on_externallyResized(const QRectF& rect)
   }
 }
 
-void PlotWidget::zoomOut(bool emit_signal)
+QRectF PlotWidget::fittedZoomRect()
 {
-  if (curveList().size() == 0)
+  if (curveList().empty())
   {
-    QRectF rect(0, 1, 1, -1);
-    this->setZoomRectangle(rect, false);
-    return;
+    return QRectF(0, 1, 1, -1);
   }
   updateMaximumZoomArea();
+  return maxZoomRect();
+}
 
-  setZoomRectangle(maxZoomRect(), emit_signal);
+void PlotWidget::zoomOut(bool emit_signal)
+{
+  setZoomRectangle(fittedZoomRect(), emit_signal);
   replot();
 }
 
@@ -1720,6 +1776,42 @@ bool PlotWidget::isZoomLinkEnabled() const
   return true;
 }
 
+PlotWidget::TrackerDrag PlotWidget::trackerNearPosition(const QPoint& position) const
+{
+  if (isXYPlot())
+  {
+    return TrackerDrag::NONE;
+  }
+  constexpr int tolerance = 8;
+  const auto distance = [this, &position](const CurveTracker* tracker) {
+    return std::abs(position.x() -
+                    qwtPlot()->transform(QwtPlot::xBottom, tracker->actualPosition().x()));
+  };
+  const int primary = _tracker->isEnabled() ? distance(_tracker) : tolerance + 1;
+  const int reference = (_reference_tracker_active && _reference_tracker->isEnabled())
+                            ? distance(_reference_tracker)
+                            : tolerance + 1;
+  if (primary > tolerance && reference > tolerance)
+  {
+    return TrackerDrag::NONE;
+  }
+  return reference < primary ? TrackerDrag::REFERENCE : TrackerDrag::PRIMARY;
+}
+
+void PlotWidget::moveTracker(TrackerDrag tracker, const QPoint& position)
+{
+  const QPointF plot_position(qwtPlot()->invTransform(QwtPlot::xBottom, position.x()),
+                              qwtPlot()->invTransform(QwtPlot::yLeft, position.y()));
+  if (tracker == TrackerDrag::REFERENCE)
+  {
+    emit referenceTrackerMoved(plot_position);
+  }
+  else if (tracker == TrackerDrag::PRIMARY)
+  {
+    emit trackerMoved(plot_position);
+  }
+}
+
 bool PlotWidget::canvasEventFilter(QEvent* event)
 {
   switch (event->type())
@@ -1737,6 +1829,22 @@ bool PlotWidget::canvasEventFilter(QEvent* event)
       if (mouse_event->button() == Qt::LeftButton)
       {
         const QPoint press_point = mouse_event->pos();
+        if (mouse_event->modifiers() == Qt::NoModifier)
+        {
+          _tracker_drag = trackerNearPosition(press_point);
+          if (_tracker_drag != TrackerDrag::NONE)
+          {
+            qwtPlot()->canvas()->setCursor(Qt::SizeHorCursor);
+            return true;
+          }
+        }
+        if (mouse_event->modifiers() == (Qt::ShiftModifier | Qt::ControlModifier))
+        {
+          emit referenceTrackerMoved(
+              QPointF(qwtPlot()->invTransform(QwtPlot::xBottom, press_point.x()),
+                      qwtPlot()->invTransform(QwtPlot::yLeft, press_point.y())));
+          return true;
+        }
         if (mouse_event->modifiers() == Qt::ShiftModifier)  // time tracker
         {
           QPointF pointF(qwtPlot()->invTransform(QwtPlot::xBottom, press_point.x()),
@@ -1773,10 +1881,27 @@ bool PlotWidget::canvasEventFilter(QEvent* event)
       QPointF pointF(qwtPlot()->invTransform(QwtPlot::xBottom, point.x()),
                      qwtPlot()->invTransform(QwtPlot::yLeft, point.y()));
 
+      if (_tracker_drag != TrackerDrag::NONE &&
+          mouse_event->buttons().testFlag(Qt::LeftButton))
+      {
+        moveTracker(_tracker_drag, point);
+        return true;
+      }
+      if (mouse_event->buttons() == Qt::LeftButton &&
+          mouse_event->modifiers() == (Qt::ShiftModifier | Qt::ControlModifier))
+      {
+        emit referenceTrackerMoved(pointF);
+        return true;
+      }
       if (mouse_event->buttons() == Qt::LeftButton && mouse_event->modifiers() == Qt::ShiftModifier)
       {
         emit trackerMoved(pointF);
         return true;
+      }
+      if (mouse_event->buttons() == Qt::NoButton)
+      {
+        const bool over_tracker = trackerNearPosition(point) != TrackerDrag::NONE;
+        qwtPlot()->canvas()->setCursor(over_tracker ? Qt::SizeHorCursor : Qt::ArrowCursor);
       }
       showPointValues(point);
     }
@@ -1785,9 +1910,20 @@ bool PlotWidget::canvasEventFilter(QEvent* event)
     case QEvent::Leave: {
       _dragging.mode = DragInfo::NONE;
       _dragging.curves.clear();
+      _tracker_drag = TrackerDrag::NONE;
+      qwtPlot()->canvas()->unsetCursor();
     }
     break;
     case QEvent::MouseButtonRelease: {
+      if (_tracker_drag != TrackerDrag::NONE)
+      {
+        _tracker_drag = TrackerDrag::NONE;
+        const auto* mouse_event = static_cast<QMouseEvent*>(event);
+        qwtPlot()->canvas()->setCursor(trackerNearPosition(mouse_event->pos()) != TrackerDrag::NONE
+                                          ? Qt::SizeHorCursor
+                                          : Qt::ArrowCursor);
+        return true;
+      }
       if (_dragging.mode == DragInfo::NONE)
       {
         return false;

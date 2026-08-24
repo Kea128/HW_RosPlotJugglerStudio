@@ -23,6 +23,8 @@
 #include <QMenu>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QFrame>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -39,8 +41,10 @@
 #include <QTimer>
 #include <QWindow>
 #include <QHeaderView>
+#include <QTableWidget>
 #include <QStandardPaths>
 #include <QXmlStreamReader>
+#include "qwt_text.h"
 
 #include "mainwindow.h"
 #include "curvelist_panel.h"
@@ -57,6 +61,8 @@
 #include "PlotJuggler/svg_util.h"
 #include "PlotJuggler/reactive_function.h"
 #include "multifile_prefix.h"
+#include "ruler_metrics.h"
+#include "linked_zoom_policy.h"
 
 #include "ui_aboutdialog.h"
 #include "ui_support_dialog.h"
@@ -206,6 +212,7 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
   _curvelist_widget = new CurveListPanel(_mapped_plot_data, _transform_functions, this);
 
   ui->setupUi(this);
+  initializeRulerMetricsPanel();
 
   // setupUi() sets the windowTitle so the skin-based setting must be done after
   _skin_path = "://resources/skin";
@@ -267,6 +274,10 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
 
   connect(_curvelist_widget, &CurveListPanel::hiddenItemsChanged, this,
           &MainWindow::onUpdateLeftTableValues);
+  connect(_curvelist_widget, &CurveListPanel::hiddenItemsChanged, this,
+          &MainWindow::updateMeasurementSelection);
+  connect(_curvelist_widget, &CurveListPanel::selectedCurvesChanged, this,
+          &MainWindow::updateMeasurementSelection);
 
   connect(_curvelist_widget, &CurveListPanel::deleteCurves, this,
           &MainWindow::onDeleteMultipleCurves);
@@ -434,18 +445,20 @@ MainWindow::MainWindow(const QCommandLineParser& commandline_parser, QWidget* pa
   }
 
   //----------------------------------------------------------
-  QIcon trackerIconA, trackerIconB, trackerIconC;
+  QIcon trackerIconA, trackerIconB;
 
   trackerIconA.addFile(QStringLiteral(":/style_light/line_tracker.png"), QSize(36, 36));
   trackerIconB.addFile(QStringLiteral(":/style_light/line_tracker_1.png"), QSize(36, 36));
-  trackerIconC.addFile(QStringLiteral(":/style_light/line_tracker_a.png"), QSize(36, 36));
 
   _tracker_button_icons[CurveTracker::LINE_ONLY] = trackerIconA;
   _tracker_button_icons[CurveTracker::VALUE] = trackerIconB;
-  _tracker_button_icons[CurveTracker::VALUE_NAME] = trackerIconC;
 
   int tracker_setting =
       settings.value("MainWindow.timeTrackerSetting", (int)CurveTracker::VALUE).toInt();
+  if (tracker_setting != CurveTracker::LINE_ONLY && tracker_setting != CurveTracker::VALUE)
+  {
+    tracker_setting = CurveTracker::VALUE;
+  }
   _tracker_param = static_cast<CurveTracker::Parameter>(tracker_setting);
 
   ui->buttonTimeTracker->setIcon(_tracker_button_icons[_tracker_param]);
@@ -581,6 +594,198 @@ void MainWindow::onUndoInvoked()
   _disable_undo_logging = false;
 }
 
+void MainWindow::initializeRulerMetricsPanel()
+{
+  _ruler_metrics_frame = new QFrame(ui->centralWidget);
+  _ruler_metrics_frame->setObjectName("rulerMetricsFrame");
+  auto* layout = new QVBoxLayout(_ruler_metrics_frame);
+  layout->setContentsMargins(8, 4, 8, 5);
+  layout->setSpacing(4);
+
+  _ruler_metrics_values = new QLabel(_ruler_metrics_frame);
+  _ruler_metrics_values->setObjectName("rulerMetricsValues");
+  layout->addWidget(_ruler_metrics_values);
+
+  _ruler_metrics_table = new QTableWidget(_ruler_metrics_frame);
+  _ruler_metrics_table->setObjectName("rulerMetricsTable");
+  _ruler_metrics_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  _ruler_metrics_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+  _ruler_metrics_table->setSelectionMode(QAbstractItemView::SingleSelection);
+  _ruler_metrics_table->setShowGrid(false);
+  _ruler_metrics_table->setAlternatingRowColors(true);
+  _ruler_metrics_table->setWordWrap(false);
+  _ruler_metrics_table->setTextElideMode(Qt::ElideMiddle);
+  _ruler_metrics_table->verticalHeader()->hide();
+  _ruler_metrics_table->verticalHeader()->setDefaultSectionSize(24);
+  _ruler_metrics_table->horizontalHeader()->setFixedHeight(24);
+  _ruler_metrics_table->horizontalHeader()->setHighlightSections(false);
+  layout->addWidget(_ruler_metrics_table);
+
+  auto* parent_layout = qobject_cast<QBoxLayout*>(ui->widgetTimescale->parentWidget()->layout());
+  if (parent_layout)
+  {
+    parent_layout->insertWidget(parent_layout->indexOf(ui->widgetTimescale),
+                                _ruler_metrics_frame);
+  }
+  _ruler_metrics_frame->hide();
+}
+
+std::map<QString, QColor> MainWindow::visibleNumericCurves()
+{
+  std::map<QString, QColor> curves;
+  forEachWidget([&](PlotWidget* plot) {
+    if (!plot->isVisible())
+    {
+      return;
+    }
+    for (const auto& info : plot->curveList())
+    {
+      const QString name = info.curve->title().text();
+      if (info.curve->isVisible() &&
+          _mapped_plot_data.numeric.find(name.toStdString()) != _mapped_plot_data.numeric.end())
+      {
+        curves.emplace(name, info.curve->pen().color());
+      }
+    }
+  });
+  return curves;
+}
+
+QString MainWindow::formatRulerTime(double absolute_time) const
+{
+  const int precision = QSettings().value("Preferences::precision", 3).toInt();
+  if (ui->buttonUseDateTime->isChecked())
+  {
+    return QDateTime::fromMSecsSinceEpoch(std::llround(absolute_time * 1000.0))
+        .toString("HH:mm:ss.zzz");
+  }
+  return QString::number(absolute_time - _time_offset.get(), 'f', precision) + " s";
+}
+
+void MainWindow::updateMeasurementSelection()
+{
+  QString selected;
+  for (const auto& name : _curvelist_widget->getSelectedNames())
+  {
+    if (_mapped_plot_data.numeric.find(name) != _mapped_plot_data.numeric.end())
+    {
+      selected = QString::fromStdString(name);
+      break;
+    }
+  }
+  const auto visible = visibleNumericCurves();
+  if (selected.isEmpty() && visible.size() == 1)
+  {
+    selected = visible.begin()->first;
+  }
+  _measurement_curve_name = selected;
+  updateRulerMetrics();
+}
+
+void MainWindow::scheduleRulerMetricsUpdate()
+{
+  if (_ruler_metrics_update_scheduled)
+  {
+    return;
+  }
+  _ruler_metrics_update_scheduled = true;
+  QTimer::singleShot(16, this, [this]() {
+    _ruler_metrics_update_scheduled = false;
+    updateRulerMetrics();
+  });
+}
+
+void MainWindow::updateRulerMetrics()
+{
+  if (!_ruler_metrics_frame || !_ruler_metrics_table)
+  {
+    return;
+  }
+  const auto curves = visibleNumericCurves();
+  if (curves.empty())
+  {
+    _ruler_metrics_table->clearContents();
+    _ruler_metrics_table->setRowCount(0);
+    _ruler_metrics_frame->hide();
+    return;
+  }
+
+  const bool dual = ui->buttonReferencePoint->isChecked() && _reference_tracker_time.has_value();
+  _ruler_metrics_dual = dual;
+  _ruler_metrics_values->setText(
+      dual ? tr("A %1    B %2    Δt %3 s")
+                 .arg(formatRulerTime(_tracker_time),
+                      formatRulerTime(*_reference_tracker_time),
+                      QString::number(*_reference_tracker_time - _tracker_time, 'g', 9))
+           : tr("A %1").arg(formatRulerTime(_tracker_time)));
+
+  const QStringList headers =
+      dual ? QStringList{ tr("Signal"), tr("A value"), tr("A frame"), tr("B value"),
+                          tr("B frame"), tr("B−A"), tr("Δ frame") }
+           : QStringList{ tr("Signal"), tr("A value"), tr("A frame") };
+  _ruler_metrics_table->setColumnCount(headers.size());
+  _ruler_metrics_table->setHorizontalHeaderLabels(headers);
+  _ruler_metrics_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+  _ruler_metrics_table->setRowCount(static_cast<int>(curves.size()));
+
+  const int precision = QSettings().value("Preferences::precision", 3).toInt();
+  int row = 0;
+  for (const auto& [name, color] : curves)
+  {
+    auto set_item = [&](int column, const QString& text, Qt::Alignment alignment) {
+      auto* item = new QTableWidgetItem(text);
+      item->setTextAlignment(alignment);
+      _ruler_metrics_table->setItem(row, column, item);
+    };
+    auto* signal_item = new QTableWidgetItem(name);
+    signal_item->setForeground(color);
+    signal_item->setToolTip(name);
+    _ruler_metrics_table->setItem(row, 0, signal_item);
+
+    const auto data_it = _mapped_plot_data.numeric.find(name.toStdString());
+    const auto metrics =
+        data_it == _mapped_plot_data.numeric.end()
+            ? std::optional<RulerMetrics>{}
+            : CalculateRulerMetrics(data_it->second, _tracker_time,
+                                    dual ? *_reference_tracker_time : _tracker_time);
+    if (!metrics)
+    {
+      for (int column = 1; column < headers.size(); ++column)
+      {
+        set_item(column, tr("N/A"), Qt::AlignRight | Qt::AlignVCenter);
+      }
+    }
+    else
+    {
+      set_item(1, QString::number(metrics->a.value, 'g', std::max(precision + 3, 6)),
+               Qt::AlignRight | Qt::AlignVCenter);
+      set_item(2, QString::number(metrics->a.frame), Qt::AlignRight | Qt::AlignVCenter);
+      if (dual)
+      {
+        set_item(3, QString::number(metrics->b.value, 'g', std::max(precision + 3, 6)),
+                 Qt::AlignRight | Qt::AlignVCenter);
+        set_item(4, QString::number(metrics->b.frame), Qt::AlignRight | Qt::AlignVCenter);
+        set_item(5, QString::number(metrics->delta_value, 'g', std::max(precision + 3, 6)),
+                 Qt::AlignRight | Qt::AlignVCenter);
+        set_item(6, QString::number(metrics->delta_frames), Qt::AlignRight | Qt::AlignVCenter);
+      }
+    }
+    if (!_measurement_curve_name.isEmpty() && name == _measurement_curve_name)
+    {
+      _ruler_metrics_table->selectRow(row);
+    }
+    ++row;
+  }
+  for (int column = 1; column < headers.size(); ++column)
+  {
+    _ruler_metrics_table->horizontalHeader()->setSectionResizeMode(column,
+                                                                   QHeaderView::ResizeToContents);
+  }
+  const int visible_rows = std::min(_ruler_metrics_table->rowCount(), 4);
+  _ruler_metrics_frame->setFixedHeight(58 + visible_rows * 24);
+  _ruler_metrics_frame->show();
+}
+
 void MainWindow::onUpdateLeftTableValues()
 {
   _curvelist_widget->update2ndColumnValues(_tracker_time);
@@ -595,6 +800,20 @@ void MainWindow::onTrackerMovedFromWidget(QPointF relative_pos)
   ui->timeSlider->blockSignals(prev);
 
   onTrackerTimeUpdated(_tracker_time, true);
+}
+
+void MainWindow::onReferenceTrackerMovedFromWidget(QPointF relative_pos)
+{
+  if (!ui->buttonReferencePoint->isChecked())
+  {
+    ui->buttonReferencePoint->setChecked(true);
+  }
+  _reference_tracker_time = relative_pos.x() + _time_offset.get();
+  forEachWidget([this](PlotWidget* plot) {
+    plot->setReferenceTrackerPosition(*_reference_tracker_time);
+    plot->replot();
+  });
+  scheduleRulerMetricsUpdate();
 }
 
 void MainWindow::onTimeSlider_valueChanged(double abs_time)
@@ -621,6 +840,7 @@ void MainWindow::onTrackerTimeUpdated(double absolute_time, bool do_replot)
       plot->replot();
     }
   });
+  scheduleRulerMetricsUpdate();
 }
 
 void MainWindow::initializeActions()
@@ -957,19 +1177,20 @@ void MainWindow::onPlotAdded(PlotWidget* plot)
   connect(plot, &PlotWidget::undoableChange, this, &MainWindow::onUndoableChange);
 
   connect(plot, &PlotWidget::trackerMoved, this, &MainWindow::onTrackerMovedFromWidget);
+  connect(plot, &PlotWidget::referenceTrackerMoved, this,
+          &MainWindow::onReferenceTrackerMovedFromWidget);
 
   connect(this, &MainWindow::dataSourceRemoved, plot, &PlotWidget::onDataSourceRemoved);
 
-  connect(plot, &PlotWidget::curveListChanged, this, [this]() {
+  connect(plot, &PlotWidgetBase::curveListChanged, this, [this]() {
     updateTimeOffset();
     updateTimeSlider();
+    updateMeasurementSelection();
   });
 
   connect(&_time_offset, &MonitoredValue::valueChanged, plot, &PlotWidget::on_changeTimeOffset);
 
   connect(ui->buttonUseDateTime, &QPushButton::toggled, plot, &PlotWidget::on_changeDateTimeScale);
-
-  connect(plot, &PlotWidget::curvesDropped, _curvelist_widget, &CurveListPanel::clearSelections);
 
   connect(plot, &PlotWidget::legendSizeChanged, this, [=](int point_size) {
     auto visitor = [this, plot, point_size](PlotWidget* p) {
@@ -1504,6 +1725,7 @@ bool MainWindow::loadDataFromFiles(QStringList filenames, bool auto_prefix)
   {
     updateRecentDataMenu(loaded_filenames);
     linkedZoomOut();
+    QTimer::singleShot(0, this, [this]() { linkedZoomOut(); });
     return true;
   }
   return false;
@@ -1859,7 +2081,12 @@ void MainWindow::showToast(const QString& message, const QPixmap& icon)
 void MainWindow::loadStyleSheet(QString file_path)
 {
   QFile styleFile(file_path);
-  styleFile.open(QFile::ReadOnly);
+  if (!styleFile.open(QFile::ReadOnly))
+  {
+    QMessageBox::warning(this, tr("Error loading StyleSheet"),
+                         tr("Unable to open %1:\n%2").arg(file_path, styleFile.errorString()));
+    return;
+  }
   try
   {
     QString theme = SetApplicationStyleSheet(styleFile.readAll());
@@ -1994,7 +2221,10 @@ void MainWindow::on_stylesheetChanged(QString theme)
   ui->buttonLink->setIcon(LoadSvg(":/resources/svg/link.svg", theme));
   ui->buttonRemoveTimeOffset->setIcon(LoadSvg(":/resources/svg/t0.svg", theme));
   ui->buttonLegend->setIcon(LoadSvg(":/resources/svg/legend.svg", theme));
-  ui->buttonReferencePoint->setIcon(LoadSvg(":/resources/svg/reference_line.svg", theme));
+  QIcon ruler_mode_icon;
+  ruler_mode_icon.addFile(":/resources/svg/single_ruler.svg", QSize(), QIcon::Normal, QIcon::Off);
+  ruler_mode_icon.addFile(":/resources/svg/reference_line.svg", QSize(), QIcon::Normal, QIcon::On);
+  ui->buttonReferencePoint->setIcon(ruler_mode_icon);
 
   ui->buttonStreamingOptions->setIcon(LoadSvg(":/resources/svg/settings_cog.svg", theme));
 }
@@ -2437,6 +2667,7 @@ bool MainWindow::loadLayoutFromFile(QString filename, bool load_datafiles)
   xmlLoadState(domDocument);
 
   linkedZoomOut();
+  QTimer::singleShot(0, this, [this]() { linkedZoomOut(); });
 
   _undo_states.clear();
   _undo_states.push_back(domDocument);
@@ -2447,6 +2678,7 @@ void MainWindow::linkedZoomOut()
 {
   if (ui->buttonLink->isChecked())
   {
+    bool independent_fit_used = false;
     for (const auto& it : TabbedPlotWidget::instances())
     {
       auto tabs = it.second->tabWidget();
@@ -2454,9 +2686,8 @@ void MainWindow::linkedZoomOut()
       {
         if (PlotDocker* matrix = dynamic_cast<PlotDocker*>(tabs->widget(t)))
         {
-          bool first = true;
-          Range range;
-          // find the ideal zoom
+          std::vector<std::pair<PlotWidget*, QRectF>> plot_ranges;
+          std::vector<LinkedZoomRange> time_ranges;
           for (int index = 0; index < matrix->plotCount(); index++)
           {
             PlotWidget* plot = matrix->plotAt(index);
@@ -2465,35 +2696,48 @@ void MainWindow::linkedZoomOut()
               continue;
             }
 
-            auto rect = plot->maxZoomRect();
-            if (first)
-            {
-              range.min = rect.left();
-              range.max = rect.right();
-              first = false;
-            }
-            else
-            {
-              range.min = std::min(rect.left(), range.min);
-              range.max = std::max(rect.right(), range.max);
-            }
+            const QRectF rect = plot->fittedZoomRect();
+            const double left = std::min(rect.left(), rect.right());
+            const double right = std::max(rect.left(), rect.right());
+            plot_ranges.emplace_back(plot, rect);
+            time_ranges.push_back({ left, right });
           }
-
-          for (int index = 0; index < matrix->plotCount() && !first; index++)
+          if (plot_ranges.empty())
           {
-            PlotWidget* plot = matrix->plotAt(index);
-            if (plot->isEmpty())
+            continue;
+          }
+          if (ShouldFitLinkedPlotsIndependently(time_ranges))
+          {
+            independent_fit_used = true;
+            for (const auto& [plot, rect] : plot_ranges)
             {
-              continue;
+              plot->setZoomRectangle(rect, false);
+              plot->replot();
             }
-            QRectF bound_act = plot->maxZoomRect();
-            bound_act.setLeft(range.min);
-            bound_act.setRight(range.max);
-            plot->setZoomRectangle(bound_act, false);
+            continue;
+          }
+          double minimum = time_ranges.front().min;
+          double maximum = time_ranges.front().max;
+          for (const auto& range : time_ranges)
+          {
+            minimum = std::min(minimum, range.min);
+            maximum = std::max(maximum, range.max);
+          }
+          for (const auto& [plot, rect] : plot_ranges)
+          {
+            QRectF linked_rect = rect;
+            linked_rect.setLeft(minimum);
+            linked_rect.setRight(maximum);
+            plot->setZoomRectangle(linked_rect, false);
             plot->replot();
           }
         }
       }
+    }
+    if (independent_fit_used)
+    {
+      showToast(tr("Some plots use widely separated time ranges. "
+                   "Each plot was fitted independently."));
     }
   }
   else
@@ -2863,10 +3107,6 @@ void MainWindow::on_buttonTimeTracker_pressed()
     _tracker_param = CurveTracker::VALUE;
   }
   else if (_tracker_param == CurveTracker::VALUE)
-  {
-    _tracker_param = CurveTracker::VALUE_NAME;
-  }
-  else if (_tracker_param == CurveTracker::VALUE_NAME)
   {
     _tracker_param = CurveTracker::LINE_ONLY;
   }
@@ -3736,12 +3976,12 @@ void MainWindow::on_buttonReloadData_clicked()
   {
     loadDataFromFile(info, false);
   }
+  if (!_loaded_datafiles_previous.empty())
+  {
+    linkedZoomOut();
+    QTimer::singleShot(0, this, [this]() { linkedZoomOut(); });
+  }
   ui->buttonReloadData->setEnabled(!_loaded_datafiles_previous.empty());
-}
-
-void MainWindow::on_buttonCloseStatus_clicked()
-{
-  // Status bar removed - using toast notifications instead
 }
 
 void MainWindow::on_buttonReferencePoint_toggled(bool checked)
@@ -3756,6 +3996,7 @@ void MainWindow::on_buttonReferencePoint_toggled(bool checked)
   }
   this->forEachWidget(
       [checked, this](PlotWidget* plot) { plot->onReferenceLineChecked(checked, _tracker_time); });
+  updateRulerMetrics();
 }
 
 void MainWindow::on_buttonShowpoint_toggled(bool checked)

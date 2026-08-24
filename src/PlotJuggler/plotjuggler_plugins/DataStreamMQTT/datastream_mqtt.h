@@ -4,6 +4,7 @@
 #include <QDialog>
 #include <QtPlugin>
 #include <QTimer>
+#include <atomic>
 #include <thread>
 #include "PlotJuggler/datastreamer_base.h"
 #include "PlotJuggler/messageparser_base.h"
@@ -41,7 +42,7 @@ public:
 
   std::pair<QAction*, int> notificationAction() override
   {
-    return { _notification_action, _failed_parsing };
+    return { _notification_action, _failed_parsing.load() };
   }
 
 private slots:
@@ -65,7 +66,7 @@ private:
   QString _topic_to_parse;
 
   QAction* _notification_action;
-  int _failed_parsing = 0;
+  std::atomic<int> _failed_parsing{ 0 };
 
   MQTT_Dialog* _dialog;
   ParserFactoryPlugin::Ptr _current_parser_creator;

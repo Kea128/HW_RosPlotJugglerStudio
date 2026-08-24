@@ -143,6 +143,7 @@ bool DataStreamZMQ::start(QStringList*)
   if (res == QDialog::Rejected)
   {
     _running = false;
+    dialog->deleteLater();
     return false;
   }
 

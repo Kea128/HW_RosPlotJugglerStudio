@@ -15,14 +15,14 @@ DataStreamMQTT::DataStreamMQTT() : _running(false)
   _notification_action = new QAction(this);
 
   connect(_notification_action, &QAction::triggered, this, [this]() {
+    const int failed_parsing = _failed_parsing.exchange(0);
     QMessageBox::warning(nullptr, "MQTT error",
-                         QString("Failed to parse %1 messages").arg(_failed_parsing),
+                         QString("Failed to parse %1 messages").arg(failed_parsing),
                          QMessageBox::Ok);
 
-    if (_failed_parsing > 0)
+    if (failed_parsing > 0)
     {
-      _failed_parsing = 0;
-      emit notificationsChanged(_failed_parsing);
+      emit notificationsChanged(0);
     }
   });
 
@@ -207,7 +207,7 @@ void DataStreamMQTT::onMessageReceived(const mosquitto_message* message)
 
   if (!result)
   {
-    _failed_parsing++;
-    emit notificationsChanged(_failed_parsing);
+    const int failed_parsing = ++_failed_parsing;
+    emit notificationsChanged(failed_parsing);
   }
 }

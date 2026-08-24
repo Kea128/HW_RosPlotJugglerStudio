@@ -1355,14 +1355,16 @@
                     </size>
                    </property>
                    <property name="toolTip">
-                    <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Create a &lt;span style=&quot; font-weight:700;&quot;&gt;reference point&lt;/span&gt; (blue vertical line) where the vertical line (red line) is.&lt;/p&gt;&lt;p&gt;From now on, you will see the difference from the reference point.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+                    <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Switch between &lt;span style=&quot; font-weight:700;&quot;&gt;single ruler A&lt;/span&gt; and &lt;span style=&quot; font-weight:700;&quot;&gt;dual rulers A+B&lt;/span&gt;.&lt;/p&gt;&lt;p&gt;Drag either ruler directly. Dual mode shows B−A values, time and frame differences below the plots.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
                    </property>
                    <property name="text">
                     <string/>
                    </property>
                    <property name="icon">
                     <iconset resource="resource.qrc">
-                     <normaloff>:/resources/svg/reference_line.svg</normaloff>:/resources/svg/reference_line.svg</iconset>
+                     <normaloff>:/resources/svg/single_ruler.svg</normaloff>
+                     <normalon>:/resources/svg/reference_line.svg</normalon>
+                    </iconset>
                    </property>
                    <property name="iconSize">
                     <size>

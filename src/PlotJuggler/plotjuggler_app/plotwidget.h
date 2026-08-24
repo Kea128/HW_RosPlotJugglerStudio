@@ -54,6 +54,7 @@ public:
   Range getVisualizationRangeY(Range range_X) const override;
 
   void setZoomRectangle(QRectF rect, bool emit_signal);
+  QRectF fittedZoomRect();
 
   void reloadPlotData();
 
@@ -100,7 +101,7 @@ signals:
   void rectChanged(PlotWidget* self, QRectF rect);
   void undoableChange();
   void trackerMoved(QPointF pos);
-  void curveListChanged();
+  void referenceTrackerMoved(QPointF pos);
   void curvesDropped();
   void splitHorizontal();
   void splitVertical();
@@ -132,6 +133,7 @@ public slots:
   bool isTrackerEnabled() const;
 
   void setTrackerPosition(double abs_time);
+  void setReferenceTrackerPosition(double abs_time);
 
   void on_changeTimeOffset(double offset);
 
@@ -174,6 +176,8 @@ private slots:
   void on_externallyResized(const QRectF& new_rect);
 
 private:
+  void refreshTrackerLabels();
+
   QAction* _action_removeAllCurves;
   QAction* _action_edit;
   QAction* _action_formula;
@@ -192,8 +196,20 @@ private:
   QAction* _flip_x;
   QAction* _flip_y;
 
+  std::vector<QRectF> _tracker_label_rects;
   CurveTracker* _tracker;
   CurveTracker* _reference_tracker;
+  bool _reference_tracker_active = false;
+
+  enum class TrackerDrag
+  {
+    NONE,
+    PRIMARY,
+    REFERENCE
+  };
+  TrackerDrag _tracker_drag = TrackerDrag::NONE;
+  TrackerDrag trackerNearPosition(const QPoint& position) const;
+  void moveTracker(TrackerDrag tracker, const QPoint& position);
   QwtPlotGrid* _grid;
 
   bool _show_point_enabled = false;
@@ -234,8 +250,6 @@ private:
                                      const QString& transform_ID = {}) override;
 
   double _time_offset;
-
-  double _tracker_position;
 
   Range _custom_Y_limits;
 

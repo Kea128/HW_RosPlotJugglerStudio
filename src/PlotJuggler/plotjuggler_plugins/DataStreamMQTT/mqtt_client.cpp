@@ -189,11 +189,12 @@ bool MQTTClient::configureMosquitto(const MosquittoConfig& config)
   {
     if (rc == MOSQ_ERR_ERRNO)
     {
-      char err[1024];
+      char err[1024] = {};
 #ifndef WIN32
       auto ret = strerror_r(errno, err, 1024);
 #else
-      FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, errno, 0, (LPTSTR)&err, 1024, NULL);
+      FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, errno, 0,
+                     err, static_cast<DWORD>(sizeof(err)), nullptr);
 #endif
       QMessageBox::warning(nullptr, "MQTT Client", QString("Error: %1").arg(err), QMessageBox::Ok);
     }

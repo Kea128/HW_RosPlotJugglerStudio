@@ -14,6 +14,8 @@
 
 namespace
 {
+constexpr qsizetype MAX_PENDING_RECORD_BYTES = 16 * 1024 * 1024;
+
 QString findWorker()
 {
   const QString application_dir = QCoreApplication::applicationDirPath();
@@ -81,7 +83,9 @@ const std::vector<const char*>& DataLoadROSBag::compatibleFileExtensions() const
 bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
                                       PJ::PlotDataMapRef& destination)
 {
-  if (!fileload_info || !QFileInfo::exists(fileload_info->filename))
+  const QFileInfo input_file(fileload_info ? fileload_info->filename : QString());
+  if (!fileload_info || !input_file.exists() || !input_file.isFile() ||
+      !input_file.isReadable())
   {
     QMessageBox::critical(nullptr, tr("ROS bag load failed"),
                           tr("The selected ROS bag does not exist."));
@@ -201,6 +205,11 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
     process.waitForReadyRead(50);
     stdout_buffer += process.readAllStandardOutput();
     stderr_buffer += process.readAllStandardError();
+    if (stdout_buffer.size() > MAX_PENDING_RECORD_BYTES ||
+        stderr_buffer.size() > MAX_PENDING_RECORD_BYTES)
+    {
+      protocol_error = tr("ROS bag worker produced an unterminated record larger than 16 MiB.");
+    }
     consumeBuffer(stdout_buffer, false);
     consumeBuffer(stderr_buffer, true);
     QApplication::processEvents();

@@ -75,6 +75,10 @@ CurveListPanel::CurveListPanel(PlotDataMapRef& mapped_plot_data,
 
   connect(_custom_view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
           &CurveListPanel::onCustomSelectionChanged);
+  connect(_custom_view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+          [this]() { emit selectedCurvesChanged(); });
+  connect(_tree_view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+          [this]() { emit selectedCurvesChanged(); });
 
   connect(_custom_view->verticalScrollBar(), &QScrollBar::valueChanged, this,
           &CurveListPanel::refreshValues);

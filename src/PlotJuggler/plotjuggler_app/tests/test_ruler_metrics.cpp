@@ -3,9 +3,11 @@
 #include <limits>
 #include <vector>
 
+#include "curve_tracker.h"
 #include "linked_zoom_policy.h"
 #include "ruler_metrics.h"
 #include "tracker_label_layout.h"
+#include "qwt_plot_curve.h"
 
 TEST(RulerMetrics, CalculatesBMinusAFromRosbagSamples)
 {
@@ -105,4 +107,26 @@ TEST(LinkedZoomPolicy, IgnoresInvalidRanges)
 {
   const double nan = std::numeric_limits<double>::quiet_NaN();
   EXPECT_FALSE(ShouldFitLinkedPlotsIndependently({ { 0.0, 1.0 }, { nan, 10.0 } }));
+}
+
+TEST(CurveTrackerSampling, RejectsPointsOutsideCurveTimeDomain)
+{
+  QwtPlotCurve curve;
+  curve.setSamples(QVector<QPointF>{ { 1.0, 10.0 }, { 2.0, 20.0 }, { 3.0, 30.0 } });
+  EXPECT_FALSE(curvePointAt(&curve, 0.9).has_value());
+  EXPECT_FALSE(curvePointAt(&curve, 3.1).has_value());
+  ASSERT_TRUE(curvePointAt(&curve, 1.0).has_value());
+  EXPECT_DOUBLE_EQ(curvePointAt(&curve, 1.0)->y(), 10.0);
+}
+
+TEST(CurveTrackerSampling, UsesNearestSampleAndSupportsSinglePoint)
+{
+  QwtPlotCurve curve;
+  curve.setSamples(QVector<QPointF>{ { 1.0, 10.0 }, { 2.0, 20.0 } });
+  ASSERT_TRUE(curvePointAt(&curve, 1.6).has_value());
+  EXPECT_DOUBLE_EQ(curvePointAt(&curve, 1.6)->y(), 20.0);
+
+  curve.setSamples(QVector<QPointF>{ { 4.0, 42.0 } });
+  ASSERT_TRUE(curvePointAt(&curve, 4.0).has_value());
+  EXPECT_DOUBLE_EQ(curvePointAt(&curve, 4.0)->y(), 42.0);
 }

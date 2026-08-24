@@ -32,7 +32,7 @@ PreferencesDialog::PreferencesDialog(QWidget* parent)
   bool use_separator = settings.value("Preferences::use_separator", true).toBool();
   ui->checkBoxSeparator->setChecked(use_separator);
 
-  bool use_opengl = settings.value("Preferences::use_opengl", true).toBool();
+  bool use_opengl = settings.value("Preferences::use_opengl", false).toBool();
   ui->checkBoxOpenGL->setChecked(use_opengl);
 
   int precision = settings.value("Preferences::precision", 3).toInt();

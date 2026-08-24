@@ -1,0 +1,21 @@
+name: Withdraw incomplete release
+
+on:
+  push:
+    branches: [ops/withdraw-incomplete-release]
+
+permissions:
+  contents: write
+
+jobs:
+  withdraw:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove incomplete release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release delete v3.17.2-studio.1
+          --repo "${{ github.repository }}"
+          --cleanup-tag
+          --yes

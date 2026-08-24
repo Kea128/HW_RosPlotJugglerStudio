@@ -6,8 +6,8 @@ ROS 离线分析的 Studio 工作流。
 
 ## 当前状态
 
-本工作区已完成 Windows 构建、便携发布与 draft Release CI 流水线，但 ROS2 bag 和完整 GUI
-行为仍未达到发布验收：
+本工作区已恢复并接回 2026-08-19 前完成的 Studio 二次开发，同时保留在线更新、
+ROS bag 和 Windows 便携发布能力：
 
 - PlotJuggler 上游基线固定为
   [`034a5cc919909aebb124e0dc1abbe2029c3eed0f`](https://github.com/facontidavide/PlotJuggler/commit/034a5cc919909aebb124e0dc1abbe2029c3eed0f)
@@ -16,14 +16,16 @@ ROS 离线分析的 Studio 工作流。
 - 现有 `build/`、`install/`、`release/`、`.toolchain/` 和运行时目录是本地生成或
   分发产物，不是源码替代品。
 - `src/PlotJuggler/STUDIO_VERSION` 是 CMake 唯一版本源；当前版本为
-  `3.17.2-studio.1`。
+  `3.17.2-studio.2`。
+- 已恢复双标尺 A/B、直接拖动、可见曲线测量表、交点值标签与避让、时间域智能
+  fit、加载后自动 fit、Studio 品牌及历史 MQTT/ZMQ 可靠性修复。
 - Windows UCRT64 构建产物为 `RosPlotJugglerStudio.exe`，插件安装到
   `bin/plugins`。
-- 干净非 ROS 构建、106 项 CTest、安装、便携运行时 smoke test、ZIP 和 SHA-256
+- Windows UCRT64 构建和 108 项 CTest
   已在当前机器实际完成；确定性 ROS1 fixture 已通过 Python worker 与记录解析回归。
 - `main`/PR 会在 GitHub Actions 使用 MSYS2 UCRT64 构建测试；严格匹配
-  `STUDIO_VERSION` 的 `v*` tag 会生成、复验并上传 draft Release，发布仍需
-  人工验收。
+  `STUDIO_VERSION` 的 `v*` tag 会生成、复验并公开最新版 Release；发布成功后
+  自动删除旧 Release 和旧 `v*` 发布标签。
 - 现场采集的 ROS1/ROS2 bag、完整 GUI 和全部插件行为仍需单独验收。
 
 详细信息见 [UPSTREAM.md](UPSTREAM.md)、
@@ -60,8 +62,8 @@ ROS 离线分析的 Studio 工作流。
 
 提交改动前请阅读 [贡献指南](CONTRIBUTING.md)。安全漏洞请按
 [安全策略](SECURITY.md) 私密报告，不要在 Issue、fixture 或 CI 日志中提交凭证。
-签名密钥和证书私钥不得进入仓库。发布采用
-“draft Release → 独立 Windows 人工验收 → 手动 publish”，不会由 tag 自动公开。
+签名密钥和证书私钥不得进入仓库。创建版本 tag 前必须完成本地验收；tag 构建、
+测试和复验全部通过后自动公开，并仅保留最新版。
 
 ## 许可证
 

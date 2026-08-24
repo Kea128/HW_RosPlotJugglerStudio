@@ -7,6 +7,8 @@
   分支在合并前为最新状态。
 - 限制 tag 创建和 Release 发布权限；发布应由受保护 Environment 的维护者批准。
 - PR 不接收仓库写权限或发布 secrets。来自 fork 的代码只在只读 token 下构建。
+- GitHub Release 只保留最新版。新版本完全发布后，CI 自动删除旧 Release 和旧
+  `v*` 标签；不得在当前版本就绪前提前删除可用版本。
 
 ## 上游同步
 
@@ -34,4 +36,5 @@
 
 构建或发布失败时保存测试 artifact 和日志，先确认是否为源代码、MSYS2 滚动包、
 CPM 下载或 runner 资源问题。不要通过跳过测试、放宽 token 权限或替换已发布资产
-规避失败。回滚发布按 [发布流程](RELEASE_PROCESS.md) 执行。
+规避失败。问题版本应撤下并以递增版本重新发布；应用更新失败依靠本地 backup
+回滚。详细流程见 [发布流程](RELEASE_PROCESS.md)。

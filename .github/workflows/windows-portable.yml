@@ -120,7 +120,7 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-  draft-release:
+  publish-release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build-test-package
     runs-on: windows-2022
@@ -164,3 +164,40 @@ jobs:
             release/ci/*.zip.sha256
             release/ci/SHA256SUMS
             release/ci/update-manifest-*.json
+
+      - name: Remove older releases and release tags
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repository = "${{ github.repository }}"
+          $currentTag = "${{ github.ref_name }}"
+
+          $releaseTags = @(gh api "repos/$repository/releases?per_page=100" `
+            --paginate --jq '.[].tag_name')
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to enumerate existing releases."
+          }
+          foreach ($tag in $releaseTags) {
+            if ($tag -and $tag -cne $currentTag) {
+              gh release delete $tag --repo $repository --cleanup-tag --yes
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to delete old release '$tag'."
+              }
+            }
+          }
+
+          $tagRefs = @(gh api "repos/$repository/git/matching-refs/tags/v" `
+            --paginate --jq '.[].ref')
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to enumerate release tags."
+          }
+          foreach ($ref in $tagRefs) {
+            $tag = $ref -replace '^refs/tags/', ''
+            if ($tag -and $tag -cne $currentTag) {
+              gh api --method DELETE "repos/$repository/git/refs/tags/$tag"
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to delete old release tag '$tag'."
+              }
+            }
+          }

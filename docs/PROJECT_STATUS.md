@@ -1,16 +1,17 @@
 # 项目状态
 
-更新时间：2026-08-22
+更新时间：2026-08-25
 
 ## 结论
 
-PlotJuggler 3.17.2 的可确认空白上游文件已按固定提交恢复；此前剩余的
-Studio/ROS 定制空白源码也已按现有接口和随包 Python 协议重新实现。阶段 2
-已完成 Windows UCRT64 构建、安装和便携打包流水线。当前版本标识为
-`3.17.2-studio.1`。更新客户端、外置 updater 的安全替换/健康检查/失败回滚及
-本地 E2E 已完成；阶段 6/7 的仓库文件部分已加入 Windows CI、draft Release、
-发布复验脚本和维护文档。GitHub 托管 runner 上的首次执行及人工发布验收仍待
-完成。这不代表已经完成真实 ROS bag 加载、完整 GUI 或发布验收。
+当前版本为 `3.17.2-studio.2`。除 PlotJuggler 3.17.2 上游基线、重新实现的
+ROS bag 插件和在线更新外，已从 2026-08-05 至 08-19 的历史补丁恢复 Studio
+二次开发 UI：双标尺、测量表、交点标签、智能 linked zoom、自动 fit、品牌化及
+MQTT/ZMQ 可靠性修复。恢复分支完成主程序构建并通过 108/108 CTest。
+
+此前发布的 `3.17.2-studio.1` 缺少这些 UI 接线，已从 GitHub 撤下。发布流程现
+要求 tag 构建、测试、打包和复验成功后公开 Release，并在成功后自动删除其他
+Release 和旧 `v*` 发布标签，只保留最新版。
 
 ## 基线证据
 
@@ -41,28 +42,24 @@ Studio/ROS 定制空白源码也已按现有接口和随包 Python 协议重新�
 - `RecordParser` 保持旧构建产物可确认的
   `RecordParser(PlotDataMapRef&)`、`parse(QByteArray)` 和
   `recordCount()` 接口。
-- `ruler_metrics.h`、`tracker_label_layout.h` 和对应测试已恢复；
-  `linked_zoom_policy.h` 与这些测试已接入 app CMake。
-- `STUDIO_VERSION` 已设置为 `3.17.2-studio.1`，并成为 CMake 的唯一版本源；
+- `ruler_metrics.h`、`tracker_label_layout.h` 和 `linked_zoom_policy.h` 不仅已
+  恢复测试，还已接入 `CurveTracker`、`PlotWidget` 和 `MainWindow` 运行路径。
+- 已恢复 A/B 标尺直接拖动、可见曲线测量表、帧号与差值、选中高亮、标签碰撞
+  避让、时间域不兼容时独立 fit，以及加载/重载/布局后的自动 fit。
+- `STUDIO_VERSION` 已设置为 `3.17.2-studio.2`，并成为 CMake 的唯一版本源；
   configure 严格校验 SemVer，`PJ_STUDIO_VERSION` 通过 base target 公开给应用和插件。
 - Windows CMake 目标和产物均为 `RosPlotJugglerStudio`，插件安装到
   `bin/plugins`，运行时按应用目录相对定位。
-- `single_ruler.svg` 当前未被 `resource.qrc` 或 app 源码引用，因此没有把空文件
-  加入资源清单，也无需从清单删除条目。
+- `single_ruler.svg` 和 `reference_line.svg` 已恢复并加入资源清单。
 
 ## 发布前阻塞
 
-1. 用真实 ROS1 bag、ROS2 SQLite3 bag 和 ROS2 MCAP bag 验证 worker、进度、
+1. 用现场真实 ROS1 bag、ROS2 SQLite3 bag 和 ROS2 MCAP bag 验证 worker、进度、
    取消、错误提示、字符串及自定义消息行为。
-2. 用 GUI 验证安装树中所有插件的实际加载和交互；便携 smoke test 已验证目录、
-   插件 DLL 存在、应用 `--version` 启动及 Python runtime imports。
+2. 最终 GUI 人工验收双标尺拖动、多标签页测量表、隐藏/删除曲线同步和密集标签
+   视觉效果；自动化已覆盖计算、布局和采样边界。
 3. 在内存更充足的机器上启用 `-EnableMosaico` 构建并验证可选 Mosaico 插件。
-4. 启动后验证主题、布局、加载器、streamer、transform 和 Studio 定制，再更新
-   `FEATURE_PARITY.md` 的验证标记。
-5. 在 GitHub 托管 Windows runner 首次执行新增 workflow，确认 MSYS2 滚动包名、
-   CPM 网络下载、artifact 大小/配额和 draft Release 权限符合预期。
-6. 按 `docs/RELEASE_PROCESS.md` 在独立 Windows 机器完成 draft 资产人工验收后，
-   才能 publish；当前没有已人工验收的公开版本。
+4. 发布后用上一版本执行一次真实 GitHub 在线更新和失败回滚验收。
 
 ## 阶段 3：更新客户端
 
@@ -114,15 +111,15 @@ Studio/ROS 定制空白源码也已按现有接口和随包 Python 协议重新�
 - 全量目标（除显式关闭的可选 Mosaico）：构建通过；首次 8/2 并发和后续
   Mosaico 串行编译均因系统内存不足，最终以串行和
   `PJ_BUILD_MOSAICO_PLUGIN=OFF` 完成。
-- CTest：86/86 通过，最终复验 3.47 秒。此前未调用 `enable_testing()` 导致 CTest 报告
+- CTest：108/108 通过，恢复版干净构建最终复验 2.73 秒。此前未调用 `enable_testing()` 导致 CTest 报告
   “No tests were found”，已通过 `include(CTest)` 修正。
 - 安装：通过；确认 `bin/RosPlotJugglerStudio.exe`、`bin/plugins` 下 23 个插件
   DLL 和 `bin/runtime/rosbag_python/extract_rosbag.py`。
 - 便携 smoke test：通过；验证可执行文件、插件布局、manifest 和
   `rosbags/lz4/numpy/zstandard` bundled Python imports。
-- ZIP：`RosPlotJugglerStudio-3.17.2-studio.1-windows-x86_64.zip`，
-  344,011,577 bytes；SHA-256
-  `a582e8cf68964f9f75ead25646e3f43919a710cce815ea529569fb24c2c403d2`。
+- 恢复版 ZIP：`RosPlotJugglerStudio-3.17.2-studio.2-windows-x86_64.zip`，
+  345,534,439 bytes；SHA-256
+  `2c1ca579d88ede555a56197d1fde4adb2cc462930ce1bd7637feb1f41329be2d`。
 - 打包同时生成 `SHA256SUMS`、同名 `.zip.sha256` 和包内 schema v1
   `manifest.json`；便携树共 12,625 个文件，不含开发头文件。
 - 首次干净配置曾因 GitHub 下载 Wasmer 超时失败；脚本现会自动复用仓库根旧

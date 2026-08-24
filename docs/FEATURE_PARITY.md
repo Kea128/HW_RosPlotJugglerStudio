@@ -9,8 +9,8 @@
 - `[V]`：已在当前恢复后的源码上运行验证；
 - 未标记：尚无足够源码或验证证据。
 
-`[S]` 不等于功能可用，也不满足发布门禁。只有完成构建和行为验证后才可将
-checkbox 改为 `[x]`；本阶段没有任何项目达到 `[V]`。
+`[S]` 不等于完整功能验收。恢复后的源码已完成 Windows 构建和 108 项自动化测试；
+涉及鼠标手感、视觉布局和真实插件交互的项目仍需人工 GUI 验收。
 
 ## Core application
 
@@ -25,7 +25,7 @@ checkbox 改为 `[x]`；本阶段没有任何项目达到 `[V]`。
 - [ ] [S] Preserved: light theme
 - [ ] [S] Preserved: dark theme
 - [ ] Preserved: custom stylesheet loading
-- [ ] Enhanced: RosPlotJuggler Studio branding
+- [ ] [S] Enhanced: RosPlotJuggler Studio branding
 - [ ] Enhanced: high-density responsive shell
 
 ## File loaders
@@ -113,12 +113,12 @@ checkbox 改为 `[x]`；本阶段没有任何项目达到 `[V]`。
 - [ ] Preserved: maximum zoom
 - [ ] Preserved: undo/redo plot state
 - [ ] Preserved: synchronized time range
-- [ ] Enhanced: fit visible curves
+- [ ] [S] Enhanced: fit visible curves
 - [ ] Enhanced: optional synchronized Y
 - [ ] Enhanced: zoom history inspector
 
-`linked_zoom_policy.h` 已随 app 测试目标接入并完成源码级单测，但尚无 GUI 行为
-验证，因此本节不新增 `[V]`。
+`linked_zoom_policy.h` 已接入 `MainWindow::linkedZoomOut()`，
+`PlotWidget::fittedZoomRect()` 已恢复并通过策略单测；GUI 行为仍需人工验收。
 
 ## Curves and legend
 
@@ -152,16 +152,16 @@ checkbox 改为 `[x]`；本阶段没有任何项目达到 `[V]`。
 - [ ] Preserved: playback rate
 - [ ] Preserved: playback loop
 - [ ] Preserved: streaming time behavior
-- [ ] Enhanced: cursor A
-- [ ] Enhanced: cursor B
-- [ ] Enhanced: nearest-sample snapping
-- [ ] Enhanced: free cursor movement
-- [ ] Enhanced: Δt, Δvalue, slope
+- [ ] [S] Enhanced: cursor A
+- [ ] [S] Enhanced: cursor B
+- [ ] [S] Enhanced: nearest-sample snapping
+- [ ] [S] Enhanced: free cursor movement
+- [ ] [S] Enhanced: Δt, Δvalue and frame delta
 - [ ] Enhanced: draggable and sortable readings
 - [ ] Enhanced: bookmarks and loop regions
 
-Ruler metrics 与 tracker label layout 的纯逻辑源码和测试已恢复；这不证明 cursor
-A/B、拖动、吸附或读数面板已经在应用运行时接通。
+Ruler metrics、tracker label layout、A/B `CurveTracker`、直接拖动和读数面板已
+接入应用运行路径；计算、标签布局和采样边界测试通过，最终视觉交互仍需人工验收。
 
 ## Data browser
 

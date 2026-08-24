@@ -1,6 +1,6 @@
 # 更新与 ROS1 回归测试记录
 
-验证日期：2026-08-22  
+验证日期：2026-08-25  
 验证环境：Windows Server 10.0.20348、MSYS2 UCRT64、Qt 5、RelWithDebInfo
 
 ## 自动化覆盖
@@ -46,7 +46,8 @@
   --test-dir .\build\phase2-clean --output-on-failure
 ```
 
-结果：106/106 通过，3.23 秒。DataLoadROSBag parser 单独复验为 4/4 通过。
+恢复版干净构建结果：108/108 通过，2.73 秒。DataLoadROSBag parser 单独复验为
+4/4 通过；新增覆盖 CurveTracker 越界、最近采样与单点曲线。
 
 updater E2E：
 
@@ -81,8 +82,9 @@ $env:PYTHONPATH = Join-Path $Bin runtime\rosbag_python
 ```
 
 结果：通过；smoke 确认应用、updater、插件、manifest 和 ROS bag runtime。
-生成 ZIP 的 SHA-256 为
-`d46e4d749697d0eddc5a2d4092748d6d68733ca1175aad3112292c8815f3d20c`。
+`3.17.2-studio.2` 恢复版 ZIP 的 SHA-256 为
+`2c1ca579d88ede555a56197d1fde4adb2cc462930ce1bd7637feb1f41329be2d`，
+`verify-release.ps1` 与 updater E2E 均再次通过。
 
 ## 本次发现并修复
 

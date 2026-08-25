@@ -4,7 +4,7 @@
 
 ## 结论
 
-当前版本为 `3.17.2-studio.2`。除 PlotJuggler 3.17.2 上游基线、重新实现的
+当前版本为 `3.17.3`。除 PlotJuggler 3.17.2 上游基线、重新实现的
 ROS bag 插件和在线更新外，已从 2026-08-05 至 08-19 的历史补丁恢复 Studio
 二次开发 UI：双标尺、测量表、交点标签、智能 linked zoom、自动 fit、品牌化及
 MQTT/ZMQ 可靠性修复。恢复分支完成主程序构建并通过 108/108 CTest。
@@ -46,7 +46,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   恢复测试，还已接入 `CurveTracker`、`PlotWidget` 和 `MainWindow` 运行路径。
 - 已恢复 A/B 标尺直接拖动、可见曲线测量表、帧号与差值、选中高亮、标签碰撞
   避让、时间域不兼容时独立 fit，以及加载/重载/布局后的自动 fit。
-- `STUDIO_VERSION` 已设置为 `3.17.2-studio.2`，并成为 CMake 的唯一版本源；
+- `STUDIO_VERSION` 已设置为 `3.17.3`，并成为 CMake 的唯一版本源；
   configure 严格校验 SemVer，`PJ_STUDIO_VERSION` 通过 base target 公开给应用和插件。
 - Windows CMake 目标和产物均为 `RosPlotJugglerStudio`，插件安装到
   `bin/plugins`，运行时按应用目录相对定位。

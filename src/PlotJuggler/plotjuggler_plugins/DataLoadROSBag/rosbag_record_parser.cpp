@@ -46,7 +46,16 @@ RecordParser::RecordParser(PlotDataMapRef& destination) : _destination(destinati
 
 bool RecordParser::parse(const QByteArray& record)
 {
-  const QList<QByteArray> fields = record.trimmed().split('\t');
+  QByteArray line = record;
+  if (line.endsWith('\n'))
+  {
+    line.chop(1);
+  }
+  if (line.endsWith('\r'))
+  {
+    line.chop(1);
+  }
+  const QList<QByteArray> fields = line.split('\t');
   if (fields.size() != 4 || (fields[0] != "N" && fields[0] != "S"))
   {
     return false;
@@ -83,7 +92,10 @@ bool RecordParser::parse(const QByteArray& record)
   }
   else
   {
-    const QByteArray decoded = QByteArray::fromBase64(fields[3], QByteArray::AbortOnBase64DecodingErrors);
+    const QByteArray decoded =
+        fields[3].isEmpty()
+            ? QByteArray("")
+            : QByteArray::fromBase64(fields[3], QByteArray::AbortOnBase64DecodingErrors);
     if (decoded.isNull())
     {
       return false;

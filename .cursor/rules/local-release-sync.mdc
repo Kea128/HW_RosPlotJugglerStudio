@@ -1,0 +1,18 @@
+---
+description: Require every published release to have a verified local portable copy
+alwaysApply: true
+---
+
+# Local Release Sync
+
+Publishing is not complete until the matching GitHub Release has been synchronized
+back to this workspace.
+
+After a release is public:
+
+1. Run `.\scripts\sync-latest-release.ps1`.
+2. Confirm `release\CURRENT_VERSION` equals `src\PlotJuggler\STUDIO_VERSION`.
+3. Confirm `release\portable\RosPlotJugglerStudio\bin\RosPlotJugglerStudio.exe` exists.
+4. Report the local executable path to the user.
+
+Do not commit `build/`, `install/`, `release/`, downloaded archives, or binaries.

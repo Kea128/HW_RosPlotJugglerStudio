@@ -16,7 +16,7 @@ ROS bag 和 Windows 便携发布能力：
 - 现有 `build/`、`install/`、`release/`、`.toolchain/` 和运行时目录是本地生成或
   分发产物，不是源码替代品。
 - `src/PlotJuggler/STUDIO_VERSION` 是 CMake 唯一版本源；当前版本为
-  `3.17.3`。
+  `3.17.4`。
 - 已恢复双标尺 A/B、直接拖动、可见曲线测量表、交点值标签与避让、时间域智能
   fit、加载后自动 fit、Studio 品牌及历史 MQTT/ZMQ 可靠性修复。
 - Windows UCRT64 构建产物为 `RosPlotJugglerStudio.exe`，插件安装到
@@ -51,10 +51,13 @@ ROS bag 和 Windows 便携发布能力：
 .\scripts\build-windows.ps1
 .\scripts\run-windows.ps1
 .\scripts\package-portable-windows.ps1 -SkipBuild
+.\scripts\sync-latest-release.ps1
 ```
 
 构建脚本默认执行干净 configure/build、CTest 和 install。便携包生成到
 `release/`，包含 ZIP、`SHA256SUMS`、`zip.sha256` 和包内 `manifest.json`。
+发布完成后，同步脚本会校验并解压线上最新版；可直接双击
+`release\Run-RosPlotJugglerStudio.cmd` 运行，无需安装。
 可选的 Mosaico/Arrow 插件因资源开销默认关闭，可用 `-EnableMosaico` 开启。
 当前机器即使串行编译该插件仍会内存不足，因此最终验证包不含 Mosaico。
 

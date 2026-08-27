@@ -26,7 +26,11 @@ Release。PR 工作流没有仓库写权限。
    `update-manifest-<channel>.json`，再次复验后公开 Release。
 5. Release 公开成功后，CI 删除旧 Release 和旧 `v*` 发布标签，确保下载页和
    `releases/latest` 只指向当前版本。
-6. 发布后复验线上 manifest、ZIP 大小和 SHA-256，并用上一版本执行一次在线升级。
+6. 发布后运行 `.\scripts\sync-latest-release.ps1`，下载并校验线上 ZIP，将最新版
+   解压到 `release\portable\RosPlotJugglerStudio`。确认
+   `release\CURRENT_VERSION` 与 `STUDIO_VERSION` 一致，并可直接启动
+   `release\Run-RosPlotJugglerStudio.cmd`，才算发布完成。
+7. 复验线上 manifest、ZIP 大小和 SHA-256，并用上一版本执行一次在线升级。
 
 ## 回滚
 

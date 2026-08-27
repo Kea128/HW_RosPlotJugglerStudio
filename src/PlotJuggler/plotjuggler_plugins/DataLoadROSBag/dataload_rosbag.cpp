@@ -135,7 +135,11 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   bool canceled = false;
 
   const auto consumeLine = [&](const QByteArray& raw_line, bool from_stderr) {
-    const QByteArray line = raw_line.trimmed();
+    QByteArray line = raw_line;
+    if (line.endsWith('\r'))
+    {
+      line.chop(1);
+    }
     if (line.isEmpty())
     {
       return;

@@ -160,6 +160,18 @@ PlotJuggler 的数据加载、数据流、解析器、绘图、布局、回放�
 2. 新 C++ loader，复用 MCAP/SQLite 和 introspection；
 3. 第一阶段采用 Python worker，稳定后评估 C++ 热路径。
 
+当前实现采用第 1 条：先异步读取 Topic 索引并允许用户筛选，再由后台 worker
+源头过滤 connection，通过 `binary-v1` 有界列式帧增量解码。标准 MCAP 使用第
+2 条已有的原生 loader；Python MCAP 仅作为显式 fallback。加载阶段保持 UI
+可响应、支持取消，并记录阶段指标供现场性能诊断。设置
+`RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL=1` 可切换到旧文本协议；原生 MCAP 遇到
+不支持的编码或消息流时，可在错误框中启用 Python fallback 后重新打开文件。
+
+`rosbag/generate_benchmark_bags.py` 使用同一组确定性参数生成 ROS1、ROS2
+SQLite3 和 ROS2 MCAP 数据。`scripts/benchmark-rosbag-worker.ps1` 记录包大小、
+首输出延迟、总耗时、fields/s、峰值工作集和各阶段指标；CI 对三种格式生成
+可下载报告，但不以共享 runner 的性能数字阻断合并。
+
 ## 4.2 多 bag 会话
 
 - 一次打开或追加多个 bag；

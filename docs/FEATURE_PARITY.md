@@ -42,8 +42,11 @@
 - [ ] [S] Enhanced: standalone ROS2 SQLite3 bag
 - [ ] [S] Enhanced: standalone ROS2 MCAP bag
 
-以上 ROS bag 项仅表示 C++ loader、worker 协议解析、打包声明和单元测试源码已经
-恢复；尚未使用真实 bag、安装树或 GUI 执行运行验证，因此不标记 `[V]`。
+以上 ROS bag 项已覆盖 Topic 预检查/过滤、后台取消、二进制批量协议、legacy
+文本回退、损坏帧测试，以及 ROS1、ROS2 SQLite3、ROS2 MCAP 三种确定性 fixture
+的 worker-to-C++ 等价性测试。标准 MCAP 默认使用原生 loader，不支持的编码可
+启用 Python fallback。尚未使用现场真实 bag 和 GUI 执行最终验收，因此不标记
+`[V]`。
 
 ## Streaming
 

@@ -1,13 +1,13 @@
 # 项目状态
 
-更新时间：2026-08-25
+更新时间：2026-08-27
 
 ## 结论
 
-当前版本为 `3.17.4`。除 PlotJuggler 3.17.2 上游基线、重新实现的
+当前版本为 `3.17.5-rc.1`。除 PlotJuggler 3.17.2 上游基线、重新实现的
 ROS bag 插件和在线更新外，已从 2026-08-05 至 08-19 的历史补丁恢复 Studio
 二次开发 UI：双标尺、测量表、交点标签、智能 linked zoom、自动 fit、品牌化及
-MQTT/ZMQ 可靠性修复。恢复分支完成主程序构建并通过 108/108 CTest。
+MQTT/ZMQ 可靠性修复。当前源码完成增量构建并通过 120/120 CTest。
 
 此前发布的 `3.17.2-studio.1` 缺少这些 UI 接线，已从 GitHub 撤下。发布流程现
 要求 tag 构建、测试、打包和复验成功后公开 Release，并在成功后自动删除其他
@@ -35,10 +35,20 @@ Release 和旧 `v*` 发布标签，只保留最新版。
 ## 本次恢复的 Studio/ROS 源码
 
 - `DataLoadROSBag` 重新建立插件、解析库、测试目标及 Python worker 打包规则。
-- 插件通过 `QProcess` 启动
-  `runtime/rosbag_python/extract_rosbag.py`，处理 `N`、`S`、`INFO`、
-  `PROGRESS`、`DONE`、`ERROR` 和 `WARN` 记录；数据先写入临时
-  `PlotDataMapRef`，仅在 worker 正常完成后合并。
+- 插件先异步检查 bag 索引并显示可过滤、可记忆的 Topic 选择框，再由后台
+  `QProcess` 启动 `runtime/rosbag_python/extract_rosbag.py`。worker 在源头过滤
+  connection，并以版本化二进制列式帧批量传输；数据仅在 worker 正常完成后合并。
+- 加载和检查均支持取消且不再用 `processEvents()` 阻塞 UI；标准 MCAP 默认交给
+  原生 C++ loader，可通过 `RSPJ_ENABLE_PYTHON_MCAP_FALLBACK` 临时启用 Python
+  fallback。
+- worker 保留文本协议兼容入口，并新增阶段指标和
+  `rosbag-load-performance.log`，便于现场定位打开、反序列化、扁平化、传输和
+  合并耗时。
+- 新增统一三格式生成器和 worker benchmark。当前机器对 10,000 个时间步、
+  8 个数值 Topic、数组宽度 16（共 90,000 条消息、1,610,000 个字段）的生成
+  验收结果为：ROS1 4.93 秒、ROS2 SQLite3 4.31 秒、ROS2 MCAP 4.28 秒，worker
+  峰值工作集分别为 57.54、44.24、48.45 MiB。该结果验证可重复路径，不替代
+  现场真实 bag 和 GUI 合并/重绘验收。
 - `RecordParser` 保持旧构建产物可确认的
   `RecordParser(PlotDataMapRef&)`、`parse(QByteArray)` 和
   `recordCount()` 接口。
@@ -46,7 +56,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   恢复测试，还已接入 `CurveTracker`、`PlotWidget` 和 `MainWindow` 运行路径。
 - 已恢复 A/B 标尺直接拖动、可见曲线测量表、帧号与差值、选中高亮、标签碰撞
   避让、时间域不兼容时独立 fit，以及加载/重载/布局后的自动 fit。
-- `STUDIO_VERSION` 已设置为 `3.17.4`，并成为 CMake 的唯一版本源；
+- `STUDIO_VERSION` 已设置为 `3.17.5-rc.1`，并成为 CMake 的唯一版本源；
   configure 严格校验 SemVer，`PJ_STUDIO_VERSION` 通过 base target 公开给应用和插件。
 - Windows CMake 目标和产物均为 `RosPlotJugglerStudio`，插件安装到
   `bin/plugins`，运行时按应用目录相对定位。
@@ -55,7 +65,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
 ## 发布前阻塞
 
 1. 用现场真实 ROS1 bag、ROS2 SQLite3 bag 和 ROS2 MCAP bag 验证 worker、进度、
-   取消、错误提示、字符串及自定义消息行为。
+   取消、错误提示、字符串及自定义消息行为；未完成前不得发布正式候选包。
 2. 最终 GUI 人工验收双标尺拖动、多标签页测量表、隐藏/删除曲线同步和密集标签
    视觉效果；自动化已覆盖计算、布局和采样边界。
 3. 在内存更充足的机器上启用 `-EnableMosaico` 构建并验证可选 Mosaico 插件。
@@ -86,7 +96,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
 - 未用对象文件、生成 UI、安装目录或发布二进制反向替代源码。
 - 未宣称旧 `release/` 产物与当前源码一致。
 - 未修改计划文件，未创建 Git 提交。
-- 未执行真实 bag 或完整 GUI 运行验证，未将构建/打包等同于功能验收。
+- 未执行现场真实 bag 或完整 GUI 运行验证，未将构建/打包等同于功能验收。
 
 ## 阶段 6/7：CI 与维护文件
 
@@ -128,3 +138,8 @@ Release 和旧 `v*` 发布标签，只保留最新版。
 - 阶段 3 增量构建：`RosPlotJugglerStudio` 目标通过（Windows UCRT64，
   `RelWithDebInfo`，串行构建）。
 - 阶段 3 单测：新增 `SemVer.*` / `UpdateManifest.*` 共 7/7 通过。
+- ROS bag 性能改造增量构建通过；当前全量 CTest 为 119/119，通过项包含二进制
+  帧边界/损坏输入测试，以及从生成 ROS1 bag 到 Topic 过滤和 C++ 解码的端到端测试。
+- 180,200 条消息、880,200 个输出字段的本地 worker 基准中，旧文本协议中位数
+  6.65 秒，二进制协议和路径缓存为 3.78 秒；只选两个数值 Topic 为 1.24 秒。
+  该数据不包含旧 GUI 逐行解析开销，不能替代现场 bag 的 GUI 验收。

@@ -77,6 +77,25 @@ jobs:
             -Configuration RelWithDebInfo `
             -Jobs 2
 
+      - name: Record ROS bag worker benchmarks
+        shell: pwsh
+        run: |
+          $python = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'ucrt64\bin\python.exe'
+          $worker = 'runtime\rosbag_python\extract_rosbag.py'
+          $env:PYTHONPATH = Join-Path $PWD 'runtime\rosbag_python'
+          foreach ($format in @('ros1', 'ros2-sqlite', 'ros2-mcap')) {
+            $bag = Join-Path 'artifacts\benchmark' "ci-$format"
+            if ($format -eq 'ros1') { $bag += '.bag' }
+            & $python rosbag\generate_benchmark_bags.py `
+              --format $format --output $bag --messages 2000 --topics 5 `
+              --array-width 16 --empty-string-ratio 0.1
+            if ($LASTEXITCODE -ne 0) { throw "Failed to generate $format benchmark." }
+            ./scripts/benchmark-rosbag-worker.ps1 `
+              -BagPath $bag -PythonPath $python -WorkerPath $worker `
+              -Protocol binary-v1 -Iterations 1 `
+              -OutputPath "artifacts\benchmark\worker-$format.json"
+          }
+
       - name: Package and verify tag release
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
@@ -103,6 +122,7 @@ jobs:
           path: |
             build/ci-windows-ucrt64/Testing/**
             artifacts/test/**
+            artifacts/benchmark/*.json
           if-no-files-found: warn
           retention-days: 14
 

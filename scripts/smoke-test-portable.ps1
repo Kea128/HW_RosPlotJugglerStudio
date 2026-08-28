@@ -41,6 +41,36 @@ $env:PYTHONPATH = Join-Path $BinDirectory "runtime\rosbag_python"
 & $Python -c "from rosbags.highlevel import AnyReader; import lz4, numpy, zstandard"
 if ($LASTEXITCODE -ne 0) { throw "Bundled ROS bag Python runtime import test failed." }
 
+$Generator = Join-Path $ProjectRoot "rosbag\generate_benchmark_bags.py"
+$WorkerSmokeRoot = Join-Path ([IO.Path]::GetTempPath()) "rspj-worker-smoke-$PID"
+try {
+    if (-not (Test-Path -LiteralPath $Generator -PathType Leaf)) {
+        throw "ROS bag smoke generator is missing: $Generator"
+    }
+    [IO.Directory]::CreateDirectory($WorkerSmokeRoot) | Out-Null
+    foreach ($Format in @("ros1", "ros2-sqlite", "ros2-mcap")) {
+        $SmokeBag = Join-Path $WorkerSmokeRoot "sample-$Format"
+        if ($Format -eq "ros1") { $SmokeBag += ".bag" }
+        & $Python $Generator --format $Format --output $SmokeBag --messages 10 `
+            --topics 2 --array-width 4 --empty-string-ratio 0.2 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Bundled Python could not generate the $Format smoke fixture."
+        }
+        $InspectJson = (& $Python -u $Worker $SmokeBag --inspect) -join ""
+        if ($LASTEXITCODE -ne 0) { throw "Packaged worker inspect failed for $Format." }
+        $Index = $InspectJson | ConvertFrom-Json
+        if ([int]$Index.version -ne 1 -or [int]$Index.totalMessages -ne 30 -or
+            @($Index.topics).Count -ne 3) {
+            throw "Packaged worker returned an invalid $Format topic index."
+        }
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $WorkerSmokeRoot) {
+        Remove-Item -LiteralPath $WorkerSmokeRoot -Recurse -Force
+    }
+}
+
 $VersionOutput = Join-Path ([IO.Path]::GetTempPath()) "rspj-version-$PID.txt"
 try {
     $Process = Start-Process -FilePath $Executable -ArgumentList "--version" -WorkingDirectory $BinDirectory `

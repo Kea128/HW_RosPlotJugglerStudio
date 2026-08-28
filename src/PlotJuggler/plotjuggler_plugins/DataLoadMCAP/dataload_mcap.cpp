@@ -270,6 +270,27 @@ mcap::Status readTolerantSummary(mcap::McapReader& reader, McapSummaryInfo& info
   return mcap::StatusCode::Success;
 }
 
+bool offerPythonFallback(const QString& reason)
+{
+  QMessageBox dialog(QMessageBox::Warning, QObject::tr("Native MCAP loader unavailable"),
+                     reason, QMessageBox::NoButton, nullptr);
+  dialog.setInformativeText(
+      QObject::tr("The Python ROS bag loader may support this file. Enable it and reopen "
+                  "the MCAP file to choose the fallback loader."));
+  auto* enable = dialog.addButton(QObject::tr("Enable Python fallback"), QMessageBox::AcceptRole);
+  dialog.addButton(QMessageBox::Cancel);
+  dialog.exec();
+  if (dialog.clickedButton() != enable)
+  {
+    return false;
+  }
+  qputenv("RSPJ_ENABLE_PYTHON_MCAP_FALLBACK", "1");
+  QMessageBox::information(
+      nullptr, QObject::tr("Python MCAP fallback enabled"),
+      QObject::tr("Reopen the MCAP file and select “ROS Bag (ROS1 / ROS2)” as the loader."));
+  return true;
+}
+
 }  // anonymous namespace
 
 DataLoadMCAP::DataLoadMCAP()
@@ -523,10 +544,13 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     if (schema->name == "data_tamer_msgs/msg/Schemas")
     {
       channels_containing_datatamer_schema.insert(channel_id);
-      auto count_it = statistics->channelMessageCounts.find(channel_id);
-      if (count_it != statistics->channelMessageCounts.end())
+      if (statistics)
       {
-        total_dt_schemas += count_it->second;
+        auto count_it = statistics->channelMessageCounts.find(channel_id);
+        if (count_it != statistics->channelMessageCounts.end())
+        {
+          total_dt_schemas += count_it->second;
+        }
       }
     }
     if (schema->name == "data_tamer_msgs/msg/Snapshot")
@@ -592,6 +616,13 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     }
     QMessageBox::warning(nullptr, "Parser Error", error_message);
   }
+  if (parsers_by_channel.empty())
+  {
+    offerPythonFallback(
+        tr("None of the selected MCAP channels use an encoding supported by the native loader."));
+    reader.close();
+    return false;
+  }
 
   std::unordered_set<int> enabled_channels;
   size_t total_msgs = 0;
@@ -607,7 +638,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     {
       enabled_channels.insert(channel_id);
       auto mcap_channel = channels[channel_id]->id;
-      if (statistics->channelMessageCounts.count(mcap_channel) != 0)
+      if (statistics && statistics->channelMessageCounts.count(mcap_channel) != 0)
       {
         total_msgs += statistics->channelMessageCounts.at(channel_id);
       }
@@ -617,7 +648,9 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   //-------------------------------------------
   //---------------- Parse messages -----------
 
-  auto onProblem = [](const mcap::Status& problem) {
+  QString message_read_problem;
+  auto onProblem = [&message_read_problem](const mcap::Status& problem) {
+    message_read_problem = QString::fromStdString(problem.message);
     qDebug() << QString::fromStdString(problem.message);
   };
 
@@ -729,6 +762,13 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   }
 
   reader.close();
+  if (msg_count == 0 && !message_read_problem.isEmpty() && !progress_dialog.wasCanceled())
+  {
+    offerPythonFallback(
+        tr("The native MCAP reader could not decode the selected message stream: %1")
+            .arg(message_read_problem));
+    return false;
+  }
   qDebug() << "Loaded file in " << timer.elapsed() << "milliseconds";
-  return true;
+  return !progress_dialog.wasCanceled();
 }

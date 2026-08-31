@@ -1,13 +1,13 @@
 # 项目状态
 
-更新时间：2026-08-27
+更新时间：2026-08-31
 
 ## 结论
 
-当前版本为 `3.17.5-rc.1`。除 PlotJuggler 3.17.2 上游基线、重新实现的
+当前版本为 `3.17.5-rc.2`。除 PlotJuggler 3.17.2 上游基线、重新实现的
 ROS bag 插件和在线更新外，已从 2026-08-05 至 08-19 的历史补丁恢复 Studio
 二次开发 UI：双标尺、测量表、交点标签、智能 linked zoom、自动 fit、品牌化及
-MQTT/ZMQ 可靠性修复。当前源码完成增量构建并通过 120/120 CTest。
+MQTT/ZMQ 可靠性修复。当前源码完成增量构建并通过 122/122 CTest。
 
 此前发布的 `3.17.2-studio.1` 缺少这些 UI 接线，已从 GitHub 撤下。发布流程现
 要求 tag 构建、测试、打包和复验成功后公开 Release，并在成功后自动删除其他
@@ -49,6 +49,14 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   验收结果为：ROS1 4.93 秒、ROS2 SQLite3 4.31 秒、ROS2 MCAP 4.28 秒，worker
   峰值工作集分别为 57.54、44.24、48.45 MiB。该结果验证可重复路径，不替代
   现场真实 bag 和 GUI 合并/重绘验收。
+- `3.17.5-rc.2` 修复无 Statistics 的 MCAP Topic 被全部禁用、表格排序期间
+  Topic/Schema/计数错配及大计数按字符串排序；二进制 decoder 现允许同路径在
+  数值/字符串类型之间变化，并拒绝含 NUL 的序列名。worker 对数组、字符串块和
+  frame 设置一致上限，重复解码错误只报告一次；文本/二进制控制记录均校验消息
+  与字段计数，成功加载但跳过数据时会明确提示。空字符串样本会保留时间戳；
+  `.db3`/`.mcap` 存储文件会回溯 ROS2 metadata 目录。原生 MCAP 支持 Windows
+  Unicode 路径，扫描未选 Topic 时仍可及时取消，读取中途失败必须由用户明确
+  接受部分结果；便携 smoke test 也会检查指定 loader DLL 和二进制 worker。
 - `RecordParser` 保持旧构建产物可确认的
   `RecordParser(PlotDataMapRef&)`、`parse(QByteArray)` 和
   `recordCount()` 接口。
@@ -56,7 +64,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   恢复测试，还已接入 `CurveTracker`、`PlotWidget` 和 `MainWindow` 运行路径。
 - 已恢复 A/B 标尺直接拖动、可见曲线测量表、帧号与差值、选中高亮、标签碰撞
   避让、时间域不兼容时独立 fit，以及加载/重载/布局后的自动 fit。
-- `STUDIO_VERSION` 已设置为 `3.17.5-rc.1`，并成为 CMake 的唯一版本源；
+- `STUDIO_VERSION` 已设置为 `3.17.5-rc.2`，并成为 CMake 的唯一版本源；
   configure 严格校验 SemVer，`PJ_STUDIO_VERSION` 通过 base target 公开给应用和插件。
 - Windows CMake 目标和产物均为 `RosPlotJugglerStudio`，插件安装到
   `bin/plugins`，运行时按应用目录相对定位。

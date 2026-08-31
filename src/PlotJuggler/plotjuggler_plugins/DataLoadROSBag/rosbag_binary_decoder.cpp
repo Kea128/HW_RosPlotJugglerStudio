@@ -250,13 +250,18 @@ bool RosbagBinaryDecoder::parseSeries(const uint8_t* payload, size_t size)
   const uint8_t kind = payload[4];
   const uint32_t name_size = readU32(payload + 5);
   if ((kind != 1 && kind != 2) || name_size == 0 || name_size > MAX_NAME_SIZE ||
-      size != 9ULL + name_size || !validUtf8(payload + 9, name_size))
+      size != 9ULL + name_size ||
+      std::find(payload + 9, payload + 9 + name_size, uint8_t{ 0 }) !=
+          payload + 9 + name_size ||
+      !validUtf8(payload + 9, name_size))
   {
     return fail();
   }
 
   const std::string name(reinterpret_cast<const char*>(payload + 9), name_size);
-  if (_series.count(id) != 0 || !_series_names.emplace(name).second)
+  std::string typed_name(1, static_cast<char>(kind));
+  typed_name += name;
+  if (_series.count(id) != 0 || !_series_names.emplace(std::move(typed_name)).second)
   {
     return fail();
   }

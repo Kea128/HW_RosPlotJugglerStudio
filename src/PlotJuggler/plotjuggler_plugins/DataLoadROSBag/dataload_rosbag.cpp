@@ -26,6 +26,7 @@
 #include <QtConcurrent>
 
 #include <atomic>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -52,6 +53,10 @@ struct LoadResult
   std::atomic<qint64> current{ 0 };
   std::atomic<qint64> total{ 0 };
   std::atomic<bool> cancel_requested{ false };
+  uint64_t info_messages = 0;
+  uint64_t done_messages = 0;
+  uint64_t done_emitted = 0;
+  bool info_received = false;
   bool done = false;
   bool canceled = false;
 };
@@ -235,6 +240,8 @@ void consumeControlLine(const QByteArray& line, const std::shared_ptr<LoadResult
     if (ok && total >= 0)
     {
       result->total.store(total, std::memory_order_relaxed);
+      result->info_messages = static_cast<uint64_t>(total);
+      result->info_received = true;
     }
   }
   else if (fields[0] == "PROGRESS" && fields.size() >= 4)
@@ -263,7 +270,20 @@ void consumeControlLine(const QByteArray& line, const std::shared_ptr<LoadResult
   }
   else if (fields[0] == "DONE" && fields.size() >= 3)
   {
-    result->done = true;
+    bool messages_ok = false;
+    bool emitted_ok = false;
+    const qulonglong messages = fields[1].toULongLong(&messages_ok);
+    const qulonglong emitted = fields[2].toULongLong(&emitted_ok);
+    if (!messages_ok || !emitted_ok)
+    {
+      result->error = QStringLiteral("ROS bag worker returned an invalid DONE record.");
+    }
+    else
+    {
+      result->done_messages = static_cast<uint64_t>(messages);
+      result->done_emitted = static_cast<uint64_t>(emitted);
+      result->done = true;
+    }
   }
 }
 
@@ -346,6 +366,19 @@ void runBinaryLoadProcess(const QString& python, const QString& worker, const QS
   {
     result->error =
         QStringLiteral("ROS bag worker returned an incomplete binary stream.");
+  }
+  if (result->error.isEmpty() && (!result->info_received || !result->done))
+  {
+    result->error =
+        QStringLiteral("ROS bag worker returned incomplete binary control records.");
+  }
+  if (result->error.isEmpty() &&
+      (result->info_messages != result->done_messages ||
+       result->done_messages != decoder.messages() ||
+       result->done_emitted != static_cast<uint64_t>(decoder.recordCount())))
+  {
+    result->error =
+        QStringLiteral("ROS bag worker binary control counts do not match decoded data.");
   }
   if (result->error.isEmpty())
   {
@@ -446,6 +479,21 @@ void runTextLoadProcess(const QString& python, const QString& worker, const QStr
   if (result->error.isEmpty() && !result->done)
   {
     result->error = QStringLiteral("Legacy ROS bag worker stopped without a DONE record.");
+  }
+  if (result->error.isEmpty() && !result->info_received)
+  {
+    result->error = QStringLiteral("Legacy ROS bag worker stopped without an INFO record.");
+  }
+  if (result->error.isEmpty() && result->done_messages != result->info_messages)
+  {
+    result->error =
+        QStringLiteral("Legacy ROS bag worker DONE message count does not match INFO.");
+  }
+  if (result->error.isEmpty() &&
+      result->done_emitted != static_cast<uint64_t>(parser.recordCount()))
+  {
+    result->error =
+        QStringLiteral("Legacy ROS bag worker DONE count does not match decoded records.");
   }
 }
 
@@ -682,6 +730,12 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   {
     return false;
   }
+  if (load_result->error.isEmpty() && load_result->info_messages > 0 &&
+      load_result->done_emitted == 0 && !load_result->warnings.isEmpty())
+  {
+    load_result->error =
+        tr("None of the selected ROS bag messages could be decoded.");
+  }
   if (!load_result->error.isEmpty())
   {
     QMessageBox message(QMessageBox::Critical, tr("ROS bag load failed"),
@@ -694,6 +748,15 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
     }
     message.exec();
     return false;
+  }
+  if (!load_result->warnings.isEmpty())
+  {
+    QMessageBox message(
+        QMessageBox::Warning, tr("ROS bag loaded with skipped data"),
+        tr("%1 topic stage(s) could not be decoded. Other selected data was loaded.")
+            .arg(load_result->warnings.size()));
+    message.setDetailedText(load_result->warnings.join('\n'));
+    message.exec();
   }
 
   for (const QString& metric : load_result->metrics)

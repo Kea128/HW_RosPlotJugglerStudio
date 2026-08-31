@@ -23,6 +23,13 @@ from rosbags.highlevel import AnyReader
 from rosbags.typesys import Stores, get_typestore
 
 
+def array_limit(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 100_000:
+        raise argparse.ArgumentTypeError("must be between 0 and 100000")
+    return parsed
+
+
 @lru_cache(maxsize=131072)
 def field_path(prefix: str, field: str) -> str:
     return f"{prefix}/{field}"
@@ -74,7 +81,7 @@ def flatten(value: object, prefix: str, max_array: int) -> Iterator[tuple[str, s
 
 def resolve_input(path: Path) -> Path:
     path = path.resolve()
-    if path.suffix.lower() == ".db3":
+    if path.suffix.lower() in {".db3", ".mcap"}:
         metadata = path.parent / "metadata.yaml"
         return path.parent if metadata.exists() else path
     return path
@@ -117,6 +124,8 @@ class StageMetrics:
 
 
 class TextWriter:
+    MAX_STRING_SIZE = 8 * 1024 * 1024
+
     def __init__(self, stream: TextIO, metrics: StageMetrics) -> None:
         self.stream = stream
         self.metrics = metrics
@@ -126,7 +135,10 @@ class TextWriter:
         if kind == "N":
             self.output.append(f"N\t{timestamp}\t{encode_name(name)}\t{float(value):.17g}\n")
         else:
-            encoded = base64.b64encode(str(value).encode("utf-8")).decode("ascii")
+            raw = str(value).encode("utf-8")
+            if len(raw) > self.MAX_STRING_SIZE:
+                raise ValueError("string field exceeds legacy protocol record limit")
+            encoded = base64.b64encode(raw).decode("ascii")
             self.output.append(f"S\t{timestamp}\t{encode_name(name)}\t{encoded}\n")
         if len(self.output) >= 4096:
             self.flush()
@@ -147,6 +159,9 @@ class TextWriter:
 
 class BinaryWriter:
     MAGIC = b"RSPJBAG\0"
+    MAX_FRAME_SIZE = 64 * 1024 * 1024
+    MAX_NAME_SIZE = 1024 * 1024
+    STRING_BLOCK_LIMIT = 4 * 1024 * 1024
     SERIES_LIMIT = 2048
     TOTAL_LIMIT = 8192
 
@@ -155,6 +170,7 @@ class BinaryWriter:
         self.metrics = metrics
         self.series: dict[tuple[int, str], int] = {}
         self.buffers: OrderedDict[int, tuple[int, list[int], list[object]]] = OrderedDict()
+        self.buffer_bytes: dict[int, int] = {}
         self.next_id = 1
         self.buffered_points = 0
         self._write(self.MAGIC + struct.pack("<HH", 1, 0))
@@ -165,17 +181,26 @@ class BinaryWriter:
         self.metrics.write_seconds += time.perf_counter() - started
 
     def _frame(self, frame_type: int, payload: bytes) -> None:
+        if len(payload) > self.MAX_FRAME_SIZE:
+            raise ValueError("binary protocol frame exceeds 64 MiB")
         self._write(struct.pack("<BI", frame_type, len(payload)) + payload)
 
     def emit(self, kind: str, timestamp: int, name: str, value: object) -> None:
         kind_id = 1 if kind == "N" else 2
+        encoded_value: object = value
+        if kind_id == 2:
+            encoded_value = str(value).encode("utf-8")
+            if len(encoded_value) + 20 > self.STRING_BLOCK_LIMIT:
+                raise ValueError("string field exceeds binary protocol block limit")
         key = (kind_id, name)
         series_id = self.series.get(key)
         if series_id is None:
+            encoded_name = name.encode("utf-8")
+            if not encoded_name or len(encoded_name) > self.MAX_NAME_SIZE:
+                raise ValueError("series name exceeds binary protocol limit")
             series_id = self.next_id
             self.next_id += 1
             self.series[key] = series_id
-            encoded_name = name.encode("utf-8")
             payload = struct.pack("<IBI", series_id, kind_id, len(encoded_name)) + encoded_name
             self._frame(1, payload)
 
@@ -183,8 +208,16 @@ class BinaryWriter:
         if buffer is None:
             buffer = (kind_id, [], [])
             self.buffers[series_id] = buffer
+            self.buffer_bytes[series_id] = 8
+        record_bytes = 16 if kind_id == 1 else 12 + len(encoded_value)
+        if buffer[1] and self.buffer_bytes[series_id] + record_bytes > self.STRING_BLOCK_LIMIT:
+            self._flush_series(series_id)
+            buffer = (kind_id, [], [])
+            self.buffers[series_id] = buffer
+            self.buffer_bytes[series_id] = 8
         buffer[1].append(timestamp)
-        buffer[2].append(value)
+        buffer[2].append(encoded_value)
+        self.buffer_bytes[series_id] += record_bytes
         self.buffered_points += 1
 
         if len(buffer[1]) >= self.SERIES_LIMIT:
@@ -194,6 +227,7 @@ class BinaryWriter:
 
     def _flush_series(self, series_id: int) -> None:
         kind_id, timestamps, values = self.buffers.pop(series_id)
+        self.buffer_bytes.pop(series_id)
         count = len(timestamps)
         self.buffered_points -= count
         if kind_id == 1:
@@ -207,7 +241,7 @@ class BinaryWriter:
 
         chunks = [struct.pack("<II", series_id, count)]
         for timestamp, value in zip(timestamps, values):
-            encoded = str(value).encode("utf-8")
+            encoded = bytes(value)
             chunks.append(struct.pack("<qI", timestamp, len(encoded)))
             chunks.append(encoded)
         self._frame(3, b"".join(chunks))
@@ -266,7 +300,7 @@ def print_metrics(metrics: StageMetrics, messages: int, total_seconds: float) ->
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bag")
-    parser.add_argument("--max-array", type=int, default=100)
+    parser.add_argument("--max-array", type=array_limit, default=100)
     parser.add_argument("--protocol", choices=("text", "binary-v1"), default="text")
     parser.add_argument("--inspect", action="store_true")
     parser.add_argument("--topics-file", type=Path)
@@ -277,7 +311,19 @@ def main() -> int:
     metrics = StageMetrics()
     emitted = 0
     messages = 0
+    warned_errors: set[tuple[str, str, type[BaseException]]] = set()
     started_total = time.perf_counter()
+
+    def warn_once(topic: str, stage: str, error: BaseException) -> None:
+        key = (topic, stage, type(error))
+        if key in warned_errors:
+            return
+        warned_errors.add(key)
+        print(
+            f"WARN\t{encode_name(topic)}\t{stage}: {type(error).__name__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     try:
         requested_topics = load_topics_file(args.topics_file) if args.topics_file else None
@@ -324,12 +370,7 @@ def main() -> int:
                     if sampled:
                         metrics.add_deserialize_sample(time.perf_counter() - stage_started)
                 except Exception as error:  # Continue when one custom type is unavailable.
-                    print(
-                        f"WARN\t{encode_name(connection.topic)}\t"
-                        f"{type(error).__name__}: {error}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    warn_once(connection.topic, "deserialize", error)
                     continue
 
                 topic = connection.topic.rstrip("/") or "/"
@@ -342,12 +383,7 @@ def main() -> int:
                     if sampled:
                         metrics.add_flatten_sample(time.perf_counter() - stage_started)
                 except Exception as error:
-                    print(
-                        f"WARN\t{encode_name(connection.topic)}\t"
-                        f"{type(error).__name__}: {error}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    warn_once(connection.topic, "flatten", error)
                     continue
 
                 if messages % 500 == 0:

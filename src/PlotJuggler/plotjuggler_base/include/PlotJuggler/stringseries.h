@@ -56,7 +56,7 @@ public:
   void pushBack(std::pair<double, StringRef> p)
   {
     const auto& str = p.second;
-    if (str.data() == nullptr || str.size() == 0)
+    if (str.data() == nullptr)
     {
       return;
     }

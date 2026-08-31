@@ -81,6 +81,17 @@ TEST(RosbagWorkerE2E, InspectsFiltersAndStreamsBinary)
       output, diagnostics))
       << diagnostics.constData();
 
+  EXPECT_FALSE(runPython(
+      python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), bag,
+                QStringLiteral("--max-array"), QStringLiteral("-1") },
+      output, diagnostics));
+  EXPECT_TRUE(diagnostics.contains("must be between 0 and 100000"));
+  EXPECT_FALSE(runPython(
+      python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), bag,
+                QStringLiteral("--max-array"), QStringLiteral("100001") },
+      output, diagnostics));
+  EXPECT_TRUE(diagnostics.contains("must be between 0 and 100000"));
+
   ASSERT_TRUE(runPython(
       python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), bag,
                 QStringLiteral("--inspect") },
@@ -167,8 +178,19 @@ TEST(RosbagWorkerE2E, ProducesEquivalentDataForAllSupportedFormats)
         output, diagnostics))
         << format.toStdString() << ": " << diagnostics.constData();
 
+    QString worker_input = output_path;
+    if (format != QStringLiteral("ros1"))
+    {
+      const QString pattern = format == QStringLiteral("ros2-sqlite")
+                                  ? QStringLiteral("*.db3")
+                                  : QStringLiteral("*.mcap");
+      const QStringList storage_files =
+          QDir(output_path).entryList({ pattern }, QDir::Files);
+      ASSERT_EQ(storage_files.size(), 1);
+      worker_input = QDir(output_path).filePath(storage_files.front());
+    }
     ASSERT_TRUE(runPython(
-        python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), output_path,
+        python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), worker_input,
                   QStringLiteral("--protocol"), QStringLiteral("binary-v1") },
         output, diagnostics))
         << format.toStdString() << ": " << diagnostics.constData();
@@ -183,6 +205,15 @@ TEST(RosbagWorkerE2E, ProducesEquivalentDataForAllSupportedFormats)
     EXPECT_EQ(data.strings.size(), 4u) << format.toStdString();
     ASSERT_EQ(data.numeric.count("/benchmark/numeric_000/data[0]"), 1u);
     EXPECT_EQ(data.numeric.at("/benchmark/numeric_000/data[0]").size(), 12u);
+    ASSERT_EQ(data.strings.count("/benchmark/text/data"), 1u);
+    const auto& text = data.strings.at("/benchmark/text/data");
+    ASSERT_EQ(text.size(), 12u);
+    size_t empty_strings = 0;
+    for (const auto& point : text)
+    {
+      empty_strings += text.getString(point.y).empty() ? 1u : 0u;
+    }
+    EXPECT_EQ(empty_strings, 3u);
   }
 }
 

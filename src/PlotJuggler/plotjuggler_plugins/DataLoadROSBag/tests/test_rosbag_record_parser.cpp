@@ -35,7 +35,7 @@ TEST(RosbagRecordParser, DecodesNamesAndStringValues)
   EXPECT_EQ(series.getString(series.at(0).y), "hello");
 }
 
-TEST(RosbagRecordParser, AcceptsAndIgnoresEmptyStringValues)
+TEST(RosbagRecordParser, PreservesEmptyStringValues)
 {
   PJ::PlotDataMapRef data;
   PJ::ROSBag::RecordParser parser(data);
@@ -43,7 +43,9 @@ TEST(RosbagRecordParser, AcceptsAndIgnoresEmptyStringValues)
   ASSERT_TRUE(parser.parse("S\t42\t/topic/empty\t\r\n"));
   EXPECT_EQ(parser.recordCount(), 1u);
   ASSERT_EQ(data.strings.count("/topic/empty"), 1u);
-  EXPECT_EQ(data.strings.at("/topic/empty").size(), 0u);
+  const auto& series = data.strings.at("/topic/empty");
+  ASSERT_EQ(series.size(), 1u);
+  EXPECT_EQ(series.getString(series.at(0).y), "");
 }
 
 TEST(RosbagRecordParser, IgnoresMetadataRecords)

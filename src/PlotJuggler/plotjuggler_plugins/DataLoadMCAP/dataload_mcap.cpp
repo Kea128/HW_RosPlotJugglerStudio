@@ -19,6 +19,8 @@
 #include <QStandardItemModel>
 #include <QtConcurrent>
 
+#include <cstdio>
+#include <memory>
 #include <set>
 #include <unordered_set>
 
@@ -270,6 +272,14 @@ mcap::Status readTolerantSummary(mcap::McapReader& reader, McapSummaryInfo& info
   return mcap::StatusCode::Success;
 }
 
+void enablePythonFallback()
+{
+  qputenv("RSPJ_ENABLE_PYTHON_MCAP_FALLBACK", "1");
+  QMessageBox::information(
+      nullptr, QObject::tr("Python MCAP fallback enabled"),
+      QObject::tr("Reopen the MCAP file and select “ROS Bag (ROS1 / ROS2)” as the loader."));
+}
+
 bool offerPythonFallback(const QString& reason)
 {
   QMessageBox dialog(QMessageBox::Warning, QObject::tr("Native MCAP loader unavailable"),
@@ -284,10 +294,7 @@ bool offerPythonFallback(const QString& reason)
   {
     return false;
   }
-  qputenv("RSPJ_ENABLE_PYTHON_MCAP_FALLBACK", "1");
-  QMessageBox::information(
-      nullptr, QObject::tr("Python MCAP fallback enabled"),
-      QObject::tr("Reopen the MCAP file and select “ROS Bag (ROS1 / ROS2)” as the loader."));
+  enablePythonFallback();
   return true;
 }
 
@@ -351,8 +358,24 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   }
 
   // open file
+#ifdef _WIN32
+  std::unique_ptr<std::FILE, decltype(&std::fclose)> input_file(
+      _wfopen(info->filename.toStdWString().c_str(), L"rb"), &std::fclose);
+  if (!input_file)
+  {
+    QMessageBox::warning(nullptr, "Can't open file",
+                         tr("Windows could not open the MCAP file:\n%1")
+                             .arg(info->filename));
+    return false;
+  }
+  auto input_reader = std::make_unique<mcap::FileReader>(input_file.get());
+#endif
   mcap::McapReader reader;
+#ifdef _WIN32
+  auto status = reader.open(*input_reader);
+#else
   auto status = reader.open(info->filename.toStdString());
+#endif
   if (!status.ok())
   {
     QMessageBox::warning(nullptr, "Can't open file",
@@ -666,9 +689,10 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   auto new_progress_update = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
 
   auto updateProgress = [&]() {
-    if (msg_count++ % 100 == 0 && std::chrono::steady_clock::now() > new_progress_update)
+    const auto now = std::chrono::steady_clock::now();
+    if (now > new_progress_update)
     {
-      new_progress_update += std::chrono::milliseconds(500);
+      new_progress_update = now + std::chrono::milliseconds(500);
       progress_dialog.setValue(msg_count);
       QApplication::processEvents();
     }
@@ -676,6 +700,10 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   };
 
   auto parseMessage = [&](const mcap::Message& message) {
+    if (!updateProgress())
+    {
+      return false;
+    }
     if (enabled_channels.count(message.channelId) == 0)
     {
       return true;
@@ -696,7 +724,8 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     auto parser = parser_it->second;
     MessageRef msg(message.data, message.dataSize);
     parser->parseMessage(msg, timestamp_sec);
-    return updateProgress();
+    msg_count++;
+    return true;
   };
 
   if (messageReadMode == MessageReadMode::TolerantScan)
@@ -718,6 +747,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
       const auto& scanStatus = typedReader.status();
       if (!scanStatus.ok())
       {
+        message_read_problem = QString::fromStdString(scanStatus.message);
         qDebug() << "MCAP recovery message scan stopped:"
                  << QString::fromStdString(scanStatus.message);
         break;
@@ -762,12 +792,40 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   }
 
   reader.close();
-  if (msg_count == 0 && !message_read_problem.isEmpty() && !progress_dialog.wasCanceled())
+  if (!message_read_problem.isEmpty() && !progress_dialog.wasCanceled())
   {
-    offerPythonFallback(
-        tr("The native MCAP reader could not decode the selected message stream: %1")
-            .arg(message_read_problem));
-    return false;
+    const QString reason =
+        tr("The native MCAP reader stopped before reaching the end of the selected "
+           "message stream:\n%1")
+            .arg(message_read_problem);
+    if (msg_count == 0)
+    {
+      offerPythonFallback(reason);
+      return false;
+    }
+
+    QMessageBox dialog(QMessageBox::Warning, tr("MCAP loaded partially"), reason,
+                       QMessageBox::NoButton, nullptr);
+    dialog.setInformativeText(
+        tr("%1 selected messages were decoded before the error. Keep this partial "
+           "result, enable the Python fallback, or cancel the load.")
+            .arg(msg_count));
+    auto* keep_partial =
+        dialog.addButton(tr("Keep Partial Result"), QMessageBox::AcceptRole);
+    auto* enable_fallback =
+        dialog.addButton(tr("Enable Python fallback"), QMessageBox::ActionRole);
+    dialog.addButton(QMessageBox::Cancel);
+    dialog.setDefaultButton(keep_partial);
+    dialog.exec();
+    if (dialog.clickedButton() == enable_fallback)
+    {
+      enablePythonFallback();
+      return false;
+    }
+    if (dialog.clickedButton() != keep_partial)
+    {
+      return false;
+    }
   }
   qDebug() << "Loaded file in " << timer.elapsed() << "milliseconds";
   return !progress_dialog.wasCanceled();

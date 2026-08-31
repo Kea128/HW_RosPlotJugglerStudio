@@ -34,6 +34,11 @@ foreach ($RequiredPath in @($Executable, $Python, $Worker, $Manifest, $PluginDir
 if (-not (Get-ChildItem -LiteralPath $PluginDirectory -Filter "*.dll" -File)) {
     throw "No plugin DLLs were installed in $PluginDirectory"
 }
+foreach ($PluginName in @("*DataLoadMCAP.dll", "*DataLoadROSBag.dll")) {
+    if (-not (Get-ChildItem -LiteralPath $PluginDirectory -Filter $PluginName -File)) {
+        throw "Required loader plugin was not installed: $PluginName"
+    }
+}
 
 $env:PATH = "$BinDirectory;$env:PATH"
 $env:RSPJ_PYTHON = $Python
@@ -62,6 +67,41 @@ try {
         if ([int]$Index.version -ne 1 -or [int]$Index.totalMessages -ne 30 -or
             @($Index.topics).Count -ne 3) {
             throw "Packaged worker returned an invalid $Format topic index."
+        }
+
+        $BinaryOutput = Join-Path $WorkerSmokeRoot "sample-$Format.bin"
+        $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+        $StartInfo.FileName = $Python
+        $StartInfo.UseShellExecute = $false
+        $StartInfo.RedirectStandardOutput = $true
+        $StartInfo.RedirectStandardError = $true
+        $StartInfo.Arguments = (@("-u", $Worker, $SmokeBag, "--protocol", "binary-v1") |
+                ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join " "
+        $WorkerProcess = [Diagnostics.Process]::new()
+        $WorkerProcess.StartInfo = $StartInfo
+        [void]$WorkerProcess.Start()
+        $OutputStream = [IO.File]::Create($BinaryOutput)
+        try {
+            $CopyTask = $WorkerProcess.StandardOutput.BaseStream.CopyToAsync($OutputStream)
+            $ErrorTask = $WorkerProcess.StandardError.ReadToEndAsync()
+            if (-not $WorkerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+                $WorkerProcess.Kill()
+                throw "Packaged worker binary protocol timed out for $Format."
+            }
+            [void]$CopyTask.GetAwaiter().GetResult()
+            $Diagnostics = $ErrorTask.GetAwaiter().GetResult()
+            if ($WorkerProcess.ExitCode -ne 0) {
+                throw "Packaged worker binary protocol failed for ${Format}: $Diagnostics"
+            }
+        }
+        finally {
+            $OutputStream.Dispose()
+            $WorkerProcess.Dispose()
+        }
+        $Magic = [IO.File]::ReadAllBytes($BinaryOutput)
+        if ($Magic.Length -lt 12 -or
+            [BitConverter]::ToString($Magic, 0, 8) -ne "52-53-50-4A-42-41-47-00") {
+            throw "Packaged worker returned an invalid binary header for $Format."
         }
     }
 }

@@ -125,9 +125,10 @@ TEST(RosbagBinaryDecoder, DecodesNumericAndStringFramesAcrossEveryBoundary)
   EXPECT_DOUBLE_EQ(numbers.at(1).x, 2.5);
   EXPECT_DOUBLE_EQ(numbers.at(1).y, -3.0);
   const auto& text = data.strings.at("/label");
-  ASSERT_EQ(text.size(), 2u);
+  ASSERT_EQ(text.size(), 3u);
   EXPECT_EQ(text.getString(text.at(0).y), "hello");
-  EXPECT_EQ(text.getString(text.at(1).y), "世界");
+  EXPECT_EQ(text.getString(text.at(1).y), "");
+  EXPECT_EQ(text.getString(text.at(2).y), "世界");
 }
 
 TEST(RosbagBinaryDecoder, FinishRejectsTruncatedHeaderFrameAndMissingDone)
@@ -185,6 +186,27 @@ TEST(RosbagBinaryDecoder, RejectsUnknownAndDuplicateSeries)
   EXPECT_FALSE(duplicate.append(stream.data(), stream.size()));
 }
 
+TEST(RosbagBinaryDecoder, AllowsSameNameForDifferentSeriesKinds)
+{
+  PJ::PlotDataMapRef data;
+  PJ::ROSBag::RosbagBinaryDecoder decoder(data);
+  Bytes stream = header();
+  frame(stream, 1, series(1, 1, "/changing/data"));
+  frame(stream, 1, series(2, 2, "/changing/data"));
+  frame(stream, 4, done(0, 0));
+  ASSERT_TRUE(decoder.append(stream.data(), stream.size()));
+  ASSERT_TRUE(decoder.finish());
+  EXPECT_EQ(data.numeric.count("/changing/data"), 1u);
+  EXPECT_EQ(data.strings.count("/changing/data"), 1u);
+
+  PJ::PlotDataMapRef duplicate_data;
+  PJ::ROSBag::RosbagBinaryDecoder duplicate(duplicate_data);
+  stream = header();
+  frame(stream, 1, series(1, 1, "/duplicate"));
+  frame(stream, 1, series(2, 1, "/duplicate"));
+  EXPECT_FALSE(duplicate.append(stream.data(), stream.size()));
+}
+
 TEST(RosbagBinaryDecoder, RejectsUnknownFrameAndSeriesKinds)
 {
   PJ::PlotDataMapRef data1;
@@ -224,6 +246,12 @@ TEST(RosbagBinaryDecoder, RejectsEmptyOversizeAndInvalidUtf8Names)
   const std::string invalid_name("\xC0\xAF", 2);
   frame(stream, 1, series(1, 1, invalid_name));
   EXPECT_FALSE(utf8.append(stream.data(), stream.size()));
+
+  PJ::PlotDataMapRef null_data;
+  PJ::ROSBag::RosbagBinaryDecoder null_name(null_data);
+  stream = header();
+  frame(stream, 1, series(1, 1, std::string("/bad\0name", 9)));
+  EXPECT_FALSE(null_name.append(stream.data(), stream.size()));
 }
 
 TEST(RosbagBinaryDecoder, RejectsNonFiniteNumbersWithoutWritingFrame)

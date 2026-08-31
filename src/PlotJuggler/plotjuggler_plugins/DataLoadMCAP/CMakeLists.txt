@@ -31,3 +31,27 @@ if(WIN32 AND MSVC)
 endif()
 
 install(TARGETS DataLoadMCAP DESTINATION ${PJ_PLUGIN_INSTALL_DIRECTORY})
+
+if(BUILD_TESTING)
+  find_package(GTest QUIET)
+  if(GTest_FOUND)
+    add_executable(test_dialog_mcap
+      tests/test_dialog_mcap.cpp
+      dialog_mcap.cpp
+      ${UI_SRC})
+    target_include_directories(test_dialog_mcap PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty
+      ${CMAKE_CURRENT_BINARY_DIR})
+    if(WIN32 AND MINGW)
+      target_compile_definitions(test_dialog_mcap PRIVATE MCAP_PUBLIC=)
+    endif()
+    target_link_libraries(test_dialog_mcap PRIVATE
+      GTest::gtest
+      Qt5::Widgets
+      LZ4::lz4_static
+      zstd::libzstd_static)
+    add_test(NAME DialogMCAP COMMAND test_dialog_mcap)
+    set_tests_properties(DialogMCAP PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  endif()
+endif()

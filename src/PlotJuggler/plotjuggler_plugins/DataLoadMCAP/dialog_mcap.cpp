@@ -6,8 +6,44 @@
 #include <QPushButton>
 #include <QElapsedTimer>
 
+#include <cstdint>
+
 #define MCAP_IMPLEMENTATION
 #include <mcap/reader.hpp>
+
+namespace
+{
+class MessageCountItem : public QTableWidgetItem
+{
+public:
+  MessageCountItem(bool known, uint64_t count)
+    : QTableWidgetItem(known ? QString::number(static_cast<qulonglong>(count))
+                             : QObject::tr("Unknown"))
+    , _known(known)
+    , _count(count)
+  {
+  }
+
+  bool operator<(const QTableWidgetItem& other) const override
+  {
+    const auto* count_item = dynamic_cast<const MessageCountItem*>(&other);
+    if (!count_item)
+    {
+      return QTableWidgetItem::operator<(other);
+    }
+    if (_known != count_item->_known)
+    {
+      return _known;
+    }
+    return _known ? _count < count_item->_count :
+                    QTableWidgetItem::operator<(other);
+  }
+
+private:
+  bool _known;
+  uint64_t _count;
+};
+}  // namespace
 
 const QString DialogMCAP::prefix = "DialogLoadMCAP::";
 
@@ -48,12 +84,15 @@ DialogMCAP::DialogMCAP(const std::unordered_map<int, mcap::ChannelPtr>& channels
   ui->tableWidget->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
   ui->tableWidget->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
 
+  ui->tableWidget->setSortingEnabled(false);
   ui->tableWidget->setRowCount(channels.size());
 
   QSettings settings;
   restoreGeometry(settings.value(prefix + "geometry").toByteArray());
 
   mcap::LoadParams params;
+  const bool restore_selected_topics =
+      default_parameters.has_value() || settings.contains(prefix + "selected");
   if (!default_parameters)
   {
     params.selected_topics = settings.value(prefix + "selected").toStringList();
@@ -102,28 +141,41 @@ DialogMCAP::DialogMCAP(const std::unordered_map<int, mcap::ChannelPtr>& channels
     ui->tableWidget->setItem(row, 2,
                              new QTableWidgetItem(QString::fromStdString(schema->encoding)));
 
-    auto count_it = messages_count_by_channelID.find(id);
-    int message_count = (count_it != messages_count_by_channelID.end()) ? count_it->second : 0;
-    ui->tableWidget->setItem(row, 3, new QTableWidgetItem(QString::number(message_count)));
+    const auto count_it = messages_count_by_channelID.find(id);
+    const bool count_known = count_it != messages_count_by_channelID.end();
+    const uint64_t message_count = count_known ? count_it->second : 0;
+    ui->tableWidget->setItem(row, 3, new MessageCountItem(count_known, message_count));
 
     for (int col = 0; col < columns_count; ++col)
     {
       QTableWidgetItem* it = ui->tableWidget->item(row, col);
-      if (message_count == 0)
+      if (count_known && message_count == 0)
       {
         it->setFlags(it->flags() & ~(Qt::ItemIsEnabled | Qt::ItemIsSelectable));
         it->setForeground(QBrush(Qt::gray));
       }
     }
-    if (message_count != 0 && params.selected_topics.contains(topic))
+    if ((!count_known || message_count != 0) &&
+        (!restore_selected_topics || params.selected_topics.contains(topic)))
     {
       ui->tableWidget->selectRow(row);
     }
     row++;
   }
+  if (ui->tableWidget->selectionModel()->selectedRows().isEmpty())
+  {
+    for (int index = 0; index < ui->tableWidget->rowCount(); ++index)
+    {
+      if (ui->tableWidget->item(index, 0)->flags().testFlag(Qt::ItemIsSelectable))
+      {
+        ui->tableWidget->selectRow(index);
+      }
+    }
+  }
   auto sort_order = (params.sorted_column >= columns_count) ? Qt::SortOrder::DescendingOrder :
                                                               Qt::SortOrder::AscendingOrder;
   auto sort_count = params.sorted_column % columns_count;
+  ui->tableWidget->setSortingEnabled(true);
   ui->tableWidget->sortByColumn(sort_count, sort_order);
 
   // Connect topic filter QLineEdit to filtering logic

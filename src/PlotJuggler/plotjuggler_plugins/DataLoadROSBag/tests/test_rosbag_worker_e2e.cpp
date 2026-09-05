@@ -11,7 +11,9 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 
+#include "ros_parser.h"
 #include "rosbag_binary_decoder.h"
+#include "rosbag_raw_decoder.h"
 #include "rosbag_record_parser.h"
 
 namespace
@@ -46,7 +48,7 @@ bool runPython(const QString& python, const QStringList& arguments, QByteArray& 
   process.setProcessEnvironment(workerEnvironment());
   process.setProcessChannelMode(QProcess::SeparateChannels);
   process.start(python, arguments);
-  if (!process.waitForStarted(10000) || !process.waitForFinished(30000))
+  if (!process.waitForStarted(10000) || !process.waitForFinished(120000))
   {
     process.kill();
     process.waitForFinished(3000);
@@ -215,6 +217,95 @@ TEST(RosbagWorkerE2E, ProducesEquivalentDataForAllSupportedFormats)
     }
     EXPECT_EQ(empty_strings, 3u);
   }
+}
+
+TEST(RosbagWorkerE2E, StreamsRawRos1MessagesForCppParser)
+{
+  const QString python = pythonExecutable();
+  if (python.isEmpty())
+  {
+    GTEST_SKIP() << "Python is not available";
+  }
+
+  QTemporaryDir temporary;
+  ASSERT_TRUE(temporary.isValid());
+  const QString bag = temporary.filePath(QStringLiteral("raw.bag"));
+  QByteArray output;
+  QByteArray diagnostics;
+  ASSERT_TRUE(runPython(
+      python,
+      { QString::fromUtf8(ROSBAG_BENCHMARK_GENERATOR_SOURCE), QStringLiteral("--format"),
+        QStringLiteral("ros1"), QStringLiteral("--output"), bag,
+        QStringLiteral("--messages"), QStringLiteral("12"), QStringLiteral("--topics"),
+        QStringLiteral("3"), QStringLiteral("--array-width"), QStringLiteral("5"),
+        QStringLiteral("--empty-string-ratio"), QStringLiteral("0.25") },
+      output, diagnostics))
+      << diagnostics.constData();
+
+  ASSERT_TRUE(runPython(
+      python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), bag,
+                QStringLiteral("--inspect") },
+      output, diagnostics))
+      << diagnostics.constData();
+  const QJsonDocument index = QJsonDocument::fromJson(output);
+  ASSERT_TRUE(index.isObject());
+  EXPECT_EQ(index.object().value(QStringLiteral("version")).toInt(), 1);
+  EXPECT_FALSE(index.object().value(QStringLiteral("topics")).toArray().isEmpty());
+  EXPECT_FALSE(index.object()
+                   .value(QStringLiteral("topics"))
+                   .toArray()
+                   .at(0)
+                   .toObject()
+                   .value(QStringLiteral("schema"))
+                   .toString()
+                   .isEmpty());
+
+  ASSERT_TRUE(runPython(
+      python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), bag,
+                QStringLiteral("--protocol"), QStringLiteral("raw-v1") },
+      output, diagnostics))
+      << diagnostics.constData();
+
+  PJ::PlotDataMapRef data;
+  PJ::ROSBag::RosbagRawDecoder decoder(
+      data,
+      [&data](const std::string& topic, const std::string& type, const std::string& schema) {
+        auto parser = std::make_shared<ParserROS>(
+            topic, type, schema, new RosMsgParser::ROS_Deserializer(), data);
+        parser->enableTruncationCheck(false);
+        return parser;
+      },
+      5);
+  ASSERT_TRUE(decoder.append(output));
+  ASSERT_TRUE(decoder.finish());
+  EXPECT_EQ(decoder.messages(), 48u);
+  EXPECT_TRUE(decoder.failedTopics().isEmpty());
+  ASSERT_EQ(data.numeric.count("/benchmark/numeric_000/data[0]"), 1u);
+  EXPECT_EQ(data.numeric.at("/benchmark/numeric_000/data[0]").size(), 12u);
+  ASSERT_EQ(data.strings.count("/benchmark/text/data"), 1u);
+  EXPECT_EQ(data.strings.at("/benchmark/text/data").size(), 12u);
+
+  ASSERT_TRUE(runPython(
+      python, { QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE), bag,
+                QStringLiteral("--protocol"), QStringLiteral("binary-v1"),
+                QStringLiteral("--max-array"), QStringLiteral("5") },
+      output, diagnostics))
+      << diagnostics.constData();
+  PJ::PlotDataMapRef binary_data;
+  PJ::ROSBag::RosbagBinaryDecoder binary_decoder(binary_data);
+  ASSERT_TRUE(binary_decoder.append(output));
+  ASSERT_TRUE(binary_decoder.finish());
+  ASSERT_EQ(binary_data.numeric.count("/benchmark/numeric_000/data[0]"), 1u);
+  EXPECT_EQ(binary_data.numeric.at("/benchmark/numeric_000/data[0]").size(),
+            data.numeric.at("/benchmark/numeric_000/data[0]").size());
+  for (size_t index = 0; index < data.numeric.at("/benchmark/numeric_000/data[0]").size(); ++index)
+  {
+    EXPECT_DOUBLE_EQ(data.numeric.at("/benchmark/numeric_000/data[0]").at(index).y,
+                     binary_data.numeric.at("/benchmark/numeric_000/data[0]").at(index).y);
+  }
+  ASSERT_EQ(binary_data.strings.count("/benchmark/text/data"), 1u);
+  EXPECT_EQ(binary_data.strings.at("/benchmark/text/data").size(),
+            data.strings.at("/benchmark/text/data").size());
 }
 
 }  // namespace

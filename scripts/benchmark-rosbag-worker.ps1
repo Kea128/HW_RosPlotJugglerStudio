@@ -7,7 +7,7 @@ param(
     [string]$PythonPath,
     [string]$WorkerPath,
     [string]$TopicsFile,
-    [ValidateSet("text", "binary-v1")]
+    [ValidateSet("text", "binary-v1", "raw-v1")]
     [string]$Protocol = "text",
     [ValidateRange(1, 10000)]
     [int]$Iterations = 3,
@@ -89,8 +89,8 @@ try {
 
     $workerSource = [IO.File]::ReadAllText($WorkerPath)
     $supportsProtocolOption = $workerSource.Contains("--protocol")
-    if ($Protocol -eq "binary-v1" -and -not $supportsProtocolOption) {
-        throw "Worker does not advertise --protocol; binary-v1 cannot be benchmarked."
+    if (($Protocol -eq "binary-v1" -or $Protocol -eq "raw-v1") -and -not $supportsProtocolOption) {
+        throw "Worker does not advertise --protocol; $Protocol cannot be benchmarked."
     }
 
     $runs = @()

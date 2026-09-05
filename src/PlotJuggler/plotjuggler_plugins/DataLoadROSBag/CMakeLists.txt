@@ -20,6 +20,8 @@ endforeach()
 add_library(rosbag_record_parser STATIC
   rosbag_binary_decoder.cpp
   rosbag_binary_decoder.h
+  rosbag_raw_decoder.cpp
+  rosbag_raw_decoder.h
   rosbag_record_parser.cpp
   rosbag_record_parser.h)
 target_include_directories(rosbag_record_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -75,7 +77,15 @@ if(BUILD_TESTING)
       ROSBAG_BENCHMARK_GENERATOR_SOURCE="${ROSBAG_BENCHMARK_GENERATOR}")
     target_link_libraries(test_rosbag_worker_e2e PRIVATE
       rosbag_record_parser
+      parser_ros_core
       GTest::gtest_main)
     gtest_discover_tests(test_rosbag_worker_e2e)
+
+    add_executable(test_rosbag_raw_decoder tests/test_rosbag_raw_decoder.cpp)
+    target_link_libraries(test_rosbag_raw_decoder PRIVATE
+      rosbag_record_parser
+      parser_ros_core
+      GTest::gtest_main)
+    gtest_discover_tests(test_rosbag_raw_decoder)
   endif()
 endif()

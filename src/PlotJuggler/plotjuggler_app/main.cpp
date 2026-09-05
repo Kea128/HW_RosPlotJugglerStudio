@@ -18,6 +18,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QCheckBox>
+#include <QtGlobal>
 
 #include "PlotJuggler/transform_function.h"
 #include "transforms/binary_filter.h"
@@ -315,6 +316,11 @@ int main(int argc, char* argv[])
 
   MainWindow* window = new MainWindow(parser);
   window->show();
+  if (qEnvironmentVariableIsSet("RSPJ_ROSBAG_EXIT_AFTER_LOAD"))
+  {
+    QTimer::singleShot(0, &app, &QCoreApplication::quit);
+    return app.exec();
+  }
 
   if (parser.isSet(update_health_option))
   {

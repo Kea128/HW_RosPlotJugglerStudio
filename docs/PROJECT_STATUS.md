@@ -1,13 +1,13 @@
 # 项目状态
 
-更新时间：2026-08-31
+更新时间：2026-09-05
 
 ## 结论
 
-当前版本为 `3.17.5-rc.2`。除 PlotJuggler 3.17.2 上游基线、重新实现的
+当前版本为 `3.17.5-rc.3`。除 PlotJuggler 3.17.2 上游基线、重新实现的
 ROS bag 插件和在线更新外，已从 2026-08-05 至 08-19 的历史补丁恢复 Studio
 二次开发 UI：双标尺、测量表、交点标签、智能 linked zoom、自动 fit、品牌化及
-MQTT/ZMQ 可靠性修复。当前源码完成增量构建并通过 122/122 CTest。
+MQTT/ZMQ 可靠性修复。当前源码完成增量构建并通过 127/127 CTest。
 
 此前发布的 `3.17.2-studio.1` 缺少这些 UI 接线，已从 GitHub 撤下。发布流程现
 要求 tag 构建、测试、打包和复验成功后公开 Release，并在成功后自动删除其他
@@ -37,7 +37,9 @@ Release 和旧 `v*` 发布标签，只保留最新版。
 - `DataLoadROSBag` 重新建立插件、解析库、测试目标及 Python worker 打包规则。
 - 插件先异步检查 bag 索引并显示可过滤、可记忆的 Topic 选择框，再由后台
   `QProcess` 启动 `runtime/rosbag_python/extract_rosbag.py`。worker 在源头过滤
-  connection，并以版本化二进制列式帧批量传输；数据仅在 worker 正常完成后合并。
+  connection。ROS1 `.bag` 默认输出 `raw-v1` 原始消息字节，由 C++ `ParserROS`
+  按 bag 自带 schema 解码；schema 失败的 Topic 回退 `binary-v1`。文本协议仍可
+  通过 `RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL` 强制。数据仅在 worker 正常完成后合并。
 - 加载和检查均支持取消且不再用 `processEvents()` 阻塞 UI；标准 MCAP 默认交给
   原生 C++ loader，可通过 `RSPJ_ENABLE_PYTHON_MCAP_FALLBACK` 临时启用 Python
   fallback。
@@ -49,6 +51,11 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   验收结果为：ROS1 4.93 秒、ROS2 SQLite3 4.31 秒、ROS2 MCAP 4.28 秒，worker
   峰值工作集分别为 57.54、44.24、48.45 MiB。该结果验证可重复路径，不替代
   现场真实 bag 和 GUI 合并/重绘验收。
+- `3.17.5-rc.3` 将 ROS1 热路径改为原始字节解析。本机 513.78 MiB /
+  540,000 条消息的数值包上，`binary-v1` worker 基线 127.16 秒（峰值 RSS
+  134.0 MiB）；`raw-v1` worker 8.60 秒（140.4 MiB）。同一文件 GUI 全选加载
+  18.44 秒（inspect 1.91s + load 13.60s + merge 1ms），取消退出 0.88 秒。
+  端到端约 27.9 MB/s，满足 500MB / 30s 门禁。CI 仍用小 fixture。
 - `3.17.5-rc.2` 修复无 Statistics 的 MCAP Topic 被全部禁用、表格排序期间
   Topic/Schema/计数错配及大计数按字符串排序；二进制 decoder 现允许同路径在
   数值/字符串类型之间变化，并拒绝含 NUL 的序列名。worker 对数组、字符串块和
@@ -64,7 +71,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   恢复测试，还已接入 `CurveTracker`、`PlotWidget` 和 `MainWindow` 运行路径。
 - 已恢复 A/B 标尺直接拖动、可见曲线测量表、帧号与差值、选中高亮、标签碰撞
   避让、时间域不兼容时独立 fit，以及加载/重载/布局后的自动 fit。
-- `STUDIO_VERSION` 已设置为 `3.17.5-rc.2`，并成为 CMake 的唯一版本源；
+- `STUDIO_VERSION` 已设置为 `3.17.5-rc.3`，并成为 CMake 的唯一版本源；
   configure 严格校验 SemVer，`PJ_STUDIO_VERSION` 通过 base target 公开给应用和插件。
 - Windows CMake 目标和产物均为 `RosPlotJugglerStudio`，插件安装到
   `bin/plugins`，运行时按应用目录相对定位。

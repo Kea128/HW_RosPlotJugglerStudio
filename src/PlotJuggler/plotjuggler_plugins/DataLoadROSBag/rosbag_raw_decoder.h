@@ -54,7 +54,6 @@ private:
   bool parseDone(const uint8_t* payload, size_t size);
   bool fail();
 
-  PlotDataMapRef& _destination;
   ParserFactory _factory;
   int _max_array = 100;
   std::vector<uint8_t> _buffer;

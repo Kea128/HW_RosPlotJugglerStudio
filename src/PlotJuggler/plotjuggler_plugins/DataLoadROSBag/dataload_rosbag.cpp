@@ -294,17 +294,24 @@ void consumeControlLine(const QByteArray& line, const std::shared_ptr<LoadResult
   }
 }
 
-void runBinaryLoadProcess(const QString& python, const QString& worker, const QString& bag,
-                          const QString& topics_file, int max_array,
-                          const std::shared_ptr<LoadResult>& result)
+QStringList workerArguments(const QString& worker, const QString& bag, const QString& protocol,
+                            const QString& topics_file, int max_array)
 {
-  PJ::ROSBag::RosbagBinaryDecoder decoder(result->data);
+  return { QStringLiteral("-u"),          worker,
+           bag,                           QStringLiteral("--protocol"),
+           protocol,                      QStringLiteral("--topics-file"),
+           topics_file,                   QStringLiteral("--max-array"),
+           QString::number(max_array) };
+}
+
+template <typename OnStdout>
+void runWorkerProcess(const QString& python, const QStringList& arguments,
+                      const std::shared_ptr<LoadResult>& result, OnStdout on_stdout,
+                      bool line_buffered_stdout)
+{
   QProcess process;
   process.setProcessChannelMode(QProcess::SeparateChannels);
-  process.start(python,
-                { QStringLiteral("-u"), worker, bag, QStringLiteral("--protocol"),
-                  QStringLiteral("binary-v1"), QStringLiteral("--topics-file"), topics_file,
-                  QStringLiteral("--max-array"), QString::number(max_array) });
+  process.start(python, arguments);
   if (!process.waitForStarted(10000))
   {
     result->error =
@@ -312,19 +319,33 @@ void runBinaryLoadProcess(const QString& python, const QString& worker, const QS
     return;
   }
 
+  QByteArray stdout_buffer;
   QByteArray stderr_buffer;
+  const auto consume_stderr = [&]() {
+    consumeLines(stderr_buffer,
+                 [&result](const QByteArray& line) { consumeControlLine(line, result); });
+  };
+  const auto stop = [&]() {
+    process.kill();
+    process.waitForFinished(3000);
+  };
+
   while (process.state() != QProcess::NotRunning)
   {
     process.waitForReadyRead(20);
-    const QByteArray data = process.readAllStandardOutput();
-    if (!data.isEmpty() && !decoder.append(data))
+    if (line_buffered_stdout)
     {
-      result->error = QStringLiteral("Invalid binary data from ROS bag worker.");
+      stdout_buffer += process.readAllStandardOutput();
+      consumeLines(stdout_buffer, on_stdout);
+    }
+    else
+    {
+      on_stdout(process.readAllStandardOutput());
     }
     stderr_buffer += process.readAllStandardError();
-    consumeLines(stderr_buffer,
-                 [&result](const QByteArray& line) { consumeControlLine(line, result); });
-    if (stderr_buffer.size() > MAX_PENDING_RECORD_BYTES)
+    consume_stderr();
+    if (stdout_buffer.size() > MAX_PENDING_RECORD_BYTES ||
+        stderr_buffer.size() > MAX_PENDING_RECORD_BYTES)
     {
       result->error =
           QStringLiteral("ROS bag worker produced an oversized diagnostic record.");
@@ -332,26 +353,31 @@ void runBinaryLoadProcess(const QString& python, const QString& worker, const QS
     if (result->cancel_requested.load(std::memory_order_relaxed))
     {
       result->canceled = true;
-      process.kill();
-      process.waitForFinished(3000);
+      stop();
       break;
     }
     if (!result->error.isEmpty())
     {
-      process.kill();
-      process.waitForFinished(3000);
+      stop();
       break;
     }
   }
 
-  const QByteArray final_data = process.readAllStandardOutput();
-  if (!final_data.isEmpty() && result->error.isEmpty() && !decoder.append(final_data))
+  if (line_buffered_stdout)
   {
-    result->error = QStringLiteral("Invalid binary data from ROS bag worker.");
+    stdout_buffer += process.readAllStandardOutput();
+    consumeLines(stdout_buffer, on_stdout);
+    if (!stdout_buffer.trimmed().isEmpty())
+    {
+      on_stdout(normalizedLine(stdout_buffer));
+    }
+  }
+  else
+  {
+    on_stdout(process.readAllStandardOutput());
   }
   stderr_buffer += process.readAllStandardError();
-  consumeLines(stderr_buffer,
-               [&result](const QByteArray& line) { consumeControlLine(line, result); });
+  consume_stderr();
   if (!stderr_buffer.isEmpty())
   {
     consumeControlLine(normalizedLine(stderr_buffer), result);
@@ -364,34 +390,51 @@ void runBinaryLoadProcess(const QString& python, const QString& worker, const QS
   if (result->error.isEmpty() &&
       (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0))
   {
-    result->error =
-        QStringLiteral("ROS bag worker exited with code %1: %2")
-            .arg(process.exitCode())
-            .arg(process.errorString());
+    result->error = QStringLiteral("ROS bag worker exited with code %1: %2")
+                        .arg(process.exitCode())
+                        .arg(process.errorString());
   }
-  if (result->error.isEmpty() && !decoder.finish())
+}
+
+void runBinaryLoadProcess(const QString& python, const QString& worker, const QString& bag,
+                          const QString& topics_file, int max_array,
+                          const std::shared_ptr<LoadResult>& result)
+{
+  PJ::ROSBag::RosbagBinaryDecoder decoder(result->data);
+  runWorkerProcess(
+      python, workerArguments(worker, bag, QStringLiteral("binary-v1"), topics_file, max_array),
+      result,
+      [&](const QByteArray& data) {
+        if (!data.isEmpty() && result->error.isEmpty() && !decoder.append(data))
+        {
+          result->error = QStringLiteral("Invalid binary data from ROS bag worker.");
+        }
+      },
+      false);
+  if (result->canceled || !result->error.isEmpty())
   {
-    result->error =
-        QStringLiteral("ROS bag worker returned an incomplete binary stream.");
+    return;
   }
-  if (result->error.isEmpty() && (!result->info_received || !result->done))
+  if (!decoder.finish())
+  {
+    result->error = QStringLiteral("ROS bag worker returned an incomplete binary stream.");
+    return;
+  }
+  if (!result->info_received || !result->done)
   {
     result->error =
         QStringLiteral("ROS bag worker returned incomplete binary control records.");
+    return;
   }
-  if (result->error.isEmpty() &&
-      (result->info_messages != result->done_messages ||
-       result->done_messages != decoder.messages() ||
-       result->done_emitted != static_cast<uint64_t>(decoder.recordCount())))
+  if (result->info_messages != result->done_messages ||
+      result->done_messages != decoder.messages() ||
+      result->done_emitted != static_cast<uint64_t>(decoder.recordCount()))
   {
     result->error =
         QStringLiteral("ROS bag worker binary control counts do not match decoded data.");
+    return;
   }
-  if (result->error.isEmpty())
-  {
-    result->current.store(static_cast<qint64>(decoder.messages()),
-                          std::memory_order_relaxed);
-  }
+  result->current.store(static_cast<qint64>(decoder.messages()), std::memory_order_relaxed);
 }
 
 void runRawLoadProcess(const QString& python, const QString& worker, const QString& bag,
@@ -399,8 +442,8 @@ void runRawLoadProcess(const QString& python, const QString& worker, const QStri
                        const PJ::ParserFactories* factories,
                        const std::shared_ptr<LoadResult>& result)
 {
-  auto create_parser = [factories, &result](const std::string& topic, const std::string& type,
-                                            const std::string& schema) -> PJ::MessageParserPtr {
+  auto create_parser = [factories, result](const std::string& topic, const std::string& type,
+                                           const std::string& schema) -> PJ::MessageParserPtr {
     if (!factories)
     {
       return {};
@@ -414,125 +457,80 @@ void runRawLoadProcess(const QString& python, const QString& worker, const QStri
   };
 
   PJ::ROSBag::RosbagRawDecoder decoder(result->data, create_parser, max_array);
-  QProcess process;
-  process.setProcessChannelMode(QProcess::SeparateChannels);
-  process.start(python,
-                { QStringLiteral("-u"), worker, bag, QStringLiteral("--protocol"),
-                  QStringLiteral("raw-v1"), QStringLiteral("--topics-file"), topics_file,
-                  QStringLiteral("--max-array"), QString::number(max_array) });
-  if (!process.waitForStarted(10000))
-  {
-    result->error =
-        QStringLiteral("Could not start Python worker: %1").arg(process.errorString());
-    return;
-  }
-
-  QByteArray stderr_buffer;
-  while (process.state() != QProcess::NotRunning)
-  {
-    process.waitForReadyRead(20);
-    const QByteArray data = process.readAllStandardOutput();
-    if (!data.isEmpty() && !decoder.append(data))
-    {
-      result->error = QStringLiteral("Invalid raw data from ROS bag worker.");
-    }
-    stderr_buffer += process.readAllStandardError();
-    consumeLines(stderr_buffer,
-                 [&result](const QByteArray& line) { consumeControlLine(line, result); });
-    if (stderr_buffer.size() > MAX_PENDING_RECORD_BYTES)
-    {
-      result->error =
-          QStringLiteral("ROS bag worker produced an oversized diagnostic record.");
-    }
-    if (result->cancel_requested.load(std::memory_order_relaxed))
-    {
-      result->canceled = true;
-      process.kill();
-      process.waitForFinished(3000);
-      break;
-    }
-    if (!result->error.isEmpty())
-    {
-      process.kill();
-      process.waitForFinished(3000);
-      break;
-    }
-  }
-
-  const QByteArray final_data = process.readAllStandardOutput();
-  if (!final_data.isEmpty() && result->error.isEmpty() && !decoder.append(final_data))
-  {
-    result->error = QStringLiteral("Invalid raw data from ROS bag worker.");
-  }
-  stderr_buffer += process.readAllStandardError();
-  consumeLines(stderr_buffer,
-               [&result](const QByteArray& line) { consumeControlLine(line, result); });
-  if (!stderr_buffer.isEmpty())
-  {
-    consumeControlLine(normalizedLine(stderr_buffer), result);
-  }
-
-  if (result->canceled)
+  runWorkerProcess(
+      python, workerArguments(worker, bag, QStringLiteral("raw-v1"), topics_file, max_array),
+      result,
+      [&](const QByteArray& data) {
+        if (!data.isEmpty() && result->error.isEmpty() && !decoder.append(data))
+        {
+          result->error = QStringLiteral("Invalid raw data from ROS bag worker.");
+        }
+      },
+      false);
+  result->warnings.append(decoder.warnings());
+  if (result->canceled || !result->error.isEmpty())
   {
     return;
   }
-  if (result->error.isEmpty() &&
-      (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0))
-  {
-    result->error =
-        QStringLiteral("ROS bag worker exited with code %1: %2")
-            .arg(process.exitCode())
-            .arg(process.errorString());
-  }
-  if (result->error.isEmpty() && !decoder.finish())
+  if (!decoder.finish())
   {
     result->error = QStringLiteral("ROS bag worker returned an incomplete raw stream.");
+    return;
   }
-  if (result->error.isEmpty() && (!result->info_received || !result->done))
+  if (!result->info_received || !result->done)
   {
-    result->error =
-        QStringLiteral("ROS bag worker returned incomplete raw control records.");
+    result->error = QStringLiteral("ROS bag worker returned incomplete raw control records.");
+    return;
   }
-  if (result->error.isEmpty() &&
-      (result->info_messages != result->done_messages ||
-       result->done_messages != decoder.messages() ||
-       result->done_emitted != decoder.messages()))
+  if (result->info_messages != result->done_messages ||
+      result->done_messages != decoder.messages() ||
+      result->done_emitted != decoder.messages())
   {
     result->error =
         QStringLiteral("ROS bag worker raw control counts do not match decoded data.");
+    return;
   }
-  result->warnings.append(decoder.warnings());
+  result->current.store(static_cast<qint64>(decoder.messages()), std::memory_order_relaxed);
+  if (decoder.failedTopics().isEmpty())
+  {
+    return;
+  }
+
+  QTemporaryFile fallback_topics(
+      QDir(QDir::tempPath()).filePath(QStringLiteral("rspj-raw-fallback-XXXXXX.json")));
+  fallback_topics.setAutoRemove(true);
+  if (!fallback_topics.open())
+  {
+    result->error = QStringLiteral("Could not create the raw-protocol fallback topic file.");
+    return;
+  }
+  QJsonArray topics;
+  for (const QString& topic : decoder.failedTopics())
+  {
+    topics.push_back(topic);
+  }
+  const QByteArray json = QJsonDocument(topics).toJson(QJsonDocument::Compact);
+  if (fallback_topics.write(json) != json.size() || !fallback_topics.flush())
+  {
+    result->error = QStringLiteral("Could not write the raw-protocol fallback topic file.");
+    return;
+  }
+  fallback_topics.close();
+  result->warnings.push_back(
+      QStringLiteral("WARN\traw-v1\tfalling back to binary-v1 for %1 topic(s)")
+          .arg(decoder.failedTopics().size()));
+
+  const uint64_t raw_info = result->info_messages;
+  const uint64_t raw_done_messages = result->done_messages;
+  const uint64_t raw_done_emitted = result->done_emitted;
+  runBinaryLoadProcess(python, worker, bag, fallback_topics.fileName(), max_array, result);
   if (result->error.isEmpty())
   {
-    result->current.store(static_cast<qint64>(decoder.messages()),
-                          std::memory_order_relaxed);
-  }
-  if (result->error.isEmpty() && !decoder.failedTopics().isEmpty())
-  {
-    QTemporaryFile fallback_topics(
-        QDir(QDir::tempPath()).filePath(QStringLiteral("rspj-raw-fallback-XXXXXX.json")));
-    fallback_topics.setAutoRemove(true);
-    if (!fallback_topics.open())
-    {
-      result->error = QStringLiteral("Could not create the raw-protocol fallback topic file.");
-      return;
-    }
-    QJsonArray topics;
-    for (const QString& topic : decoder.failedTopics())
-    {
-      topics.push_back(topic);
-    }
-    const QByteArray json = QJsonDocument(topics).toJson(QJsonDocument::Compact);
-    if (fallback_topics.write(json) != json.size() || !fallback_topics.flush())
-    {
-      result->error = QStringLiteral("Could not write the raw-protocol fallback topic file.");
-      return;
-    }
-    fallback_topics.close();
-    result->warnings.push_back(
-        QStringLiteral("WARN\traw-v1\tfalling back to binary-v1 for %1 topic(s)")
-            .arg(decoder.failedTopics().size()));
-    runBinaryLoadProcess(python, worker, bag, fallback_topics.fileName(), max_array, result);
+    result->info_messages = raw_info;
+    result->done_messages = raw_done_messages;
+    result->done_emitted = raw_done_emitted;
+    result->info_received = true;
+    result->done = true;
   }
 }
 
@@ -541,105 +539,44 @@ void runTextLoadProcess(const QString& python, const QString& worker, const QStr
                         const std::shared_ptr<LoadResult>& result)
 {
   PJ::ROSBag::RecordParser parser(result->data);
-  QProcess process;
-  process.setProcessChannelMode(QProcess::SeparateChannels);
-  process.start(python,
-                { QStringLiteral("-u"), worker, bag, QStringLiteral("--protocol"),
-                  QStringLiteral("text"), QStringLiteral("--topics-file"), topics_file,
-                  QStringLiteral("--max-array"), QString::number(max_array) });
-  if (!process.waitForStarted(10000))
-  {
-    result->error =
-        QStringLiteral("Could not start Python worker: %1").arg(process.errorString());
-    return;
-  }
-
-  QByteArray stdout_buffer;
-  QByteArray stderr_buffer;
-  const auto consume_stdout = [&parser, &result](const QByteArray& line) {
-    if (line.startsWith("N\t") || line.startsWith("S\t"))
-    {
-      if (!parser.parse(line))
-      {
-        result->error = QStringLiteral("Invalid legacy data from ROS bag worker.");
-      }
-    }
-    else
-    {
-      consumeControlLine(line, result);
-    }
-  };
-
-  while (process.state() != QProcess::NotRunning)
-  {
-    process.waitForReadyRead(20);
-    stdout_buffer += process.readAllStandardOutput();
-    stderr_buffer += process.readAllStandardError();
-    consumeLines(stdout_buffer, consume_stdout);
-    consumeLines(stderr_buffer,
-                 [&result](const QByteArray& line) { consumeControlLine(line, result); });
-    if (stdout_buffer.size() > MAX_PENDING_RECORD_BYTES ||
-        stderr_buffer.size() > MAX_PENDING_RECORD_BYTES)
-    {
-      result->error =
-          QStringLiteral("ROS bag worker produced an oversized legacy record.");
-    }
-    if (result->cancel_requested.load(std::memory_order_relaxed))
-    {
-      result->canceled = true;
-      process.kill();
-      process.waitForFinished(3000);
-      break;
-    }
-    if (!result->error.isEmpty())
-    {
-      process.kill();
-      process.waitForFinished(3000);
-      break;
-    }
-  }
-
-  stdout_buffer += process.readAllStandardOutput();
-  stderr_buffer += process.readAllStandardError();
-  consumeLines(stdout_buffer, consume_stdout);
-  consumeLines(stderr_buffer,
-               [&result](const QByteArray& line) { consumeControlLine(line, result); });
-  if (!stdout_buffer.trimmed().isEmpty())
-  {
-    consume_stdout(normalizedLine(stdout_buffer));
-  }
-  if (!stderr_buffer.trimmed().isEmpty())
-  {
-    consumeControlLine(normalizedLine(stderr_buffer), result);
-  }
-
-  if (result->canceled)
+  runWorkerProcess(
+      python, workerArguments(worker, bag, QStringLiteral("text"), topics_file, max_array),
+      result,
+      [&](const QByteArray& line) {
+        if (line.startsWith("N\t") || line.startsWith("S\t"))
+        {
+          if (!parser.parse(line))
+          {
+            result->error = QStringLiteral("Invalid legacy data from ROS bag worker.");
+          }
+        }
+        else
+        {
+          consumeControlLine(line, result);
+        }
+      },
+      true);
+  if (result->canceled || !result->error.isEmpty())
   {
     return;
   }
-  if (result->error.isEmpty() &&
-      (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0))
-  {
-    result->error =
-        QStringLiteral("Legacy ROS bag worker exited with code %1: %2")
-            .arg(process.exitCode())
-            .arg(process.errorString());
-  }
-  if (result->error.isEmpty() && !result->done)
+  if (!result->done)
   {
     result->error = QStringLiteral("Legacy ROS bag worker stopped without a DONE record.");
+    return;
   }
-  if (result->error.isEmpty() && !result->info_received)
+  if (!result->info_received)
   {
     result->error = QStringLiteral("Legacy ROS bag worker stopped without an INFO record.");
+    return;
   }
-  if (result->error.isEmpty() && result->done_messages != result->info_messages)
+  if (result->done_messages != result->info_messages)
   {
     result->error =
         QStringLiteral("Legacy ROS bag worker DONE message count does not match INFO.");
+    return;
   }
-  if (result->error.isEmpty() &&
-      result->done_emitted != static_cast<uint64_t>(parser.recordCount()))
+  if (result->done_emitted != static_cast<uint64_t>(parser.recordCount()))
   {
     result->error =
         QStringLiteral("Legacy ROS bag worker DONE count does not match decoded records.");
@@ -735,6 +672,29 @@ void mergeData(PJ::PlotDataMapRef& source, PJ::PlotDataMapRef& destination)
     destination.getOrCreateStringSeries(name).clonePoints(std::move(series));
   }
 }
+
+enum class LoadProtocol
+{
+  Text,
+  Binary,
+  Raw
+};
+
+LoadProtocol selectedLoadProtocol(const QFileInfo& input_file,
+                                  const PJ::ParserFactories* factories)
+{
+  if (qEnvironmentVariableIsSet("RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL"))
+  {
+    return LoadProtocol::Text;
+  }
+  if (!qEnvironmentVariableIsSet("RSPJ_FORCE_BINARY_ROSBAG_PROTOCOL") &&
+      input_file.suffix().compare(QStringLiteral("bag"), Qt::CaseInsensitive) == 0 &&
+      factories && factories->find(QStringLiteral("ros1msg")) != factories->end())
+  {
+    return LoadProtocol::Raw;
+  }
+  return LoadProtocol::Binary;
+}
 }  // namespace
 
 const std::vector<const char*>& DataLoadROSBag::compatibleFileExtensions() const
@@ -749,39 +709,37 @@ const std::vector<const char*>& DataLoadROSBag::compatibleFileExtensions() const
 bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
                                       PJ::PlotDataMapRef& destination)
 {
+  const auto fail = [this](const QString& text, const QString& details = {}) {
+    if (!headlessRosbagLoad())
+    {
+      QMessageBox message(QMessageBox::Critical, tr("ROS bag load failed"), text);
+      if (!details.isEmpty())
+      {
+        message.setDetailedText(details);
+      }
+      message.exec();
+    }
+    return false;
+  };
+
   const QFileInfo input_file(fileload_info ? fileload_info->filename : QString());
   if (!fileload_info || !input_file.exists() || !input_file.isFile() ||
       !input_file.isReadable())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox::critical(nullptr, tr("ROS bag load failed"),
-                            tr("The selected ROS bag does not exist."));
-    }
-    return false;
+    return fail(tr("The selected ROS bag does not exist."));
   }
 
   const QString worker = findWorker();
   const QString python = findPython();
   if (worker.isEmpty())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox::critical(
-          nullptr, tr("ROS bag load failed"),
-          tr("The packaged ROS bag worker was not found (runtime/rosbag_python/extract_rosbag.py)."));
-    }
-    return false;
+    return fail(
+        tr("The packaged ROS bag worker was not found (runtime/rosbag_python/extract_rosbag.py)."));
   }
   if (python.isEmpty())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox::critical(nullptr, tr("ROS bag load failed"),
-                            tr("Python 3 was not found. Set RSPJ_PYTHON to a Python executable "
-                               "with the 'rosbags' and 'numpy' packages installed."));
-    }
-    return false;
+    return fail(tr("Python 3 was not found. Set RSPJ_PYTHON to a Python executable "
+                   "with the 'rosbags' and 'numpy' packages installed."));
   }
 
   auto inspect_result = std::make_shared<InspectResult>();
@@ -805,28 +763,15 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   }
   if (!inspect_result->error.isEmpty())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox message(QMessageBox::Critical, tr("ROS bag load failed"),
-                          inspect_result->error);
-      message.setDetailedText(QString::fromUtf8(inspect_result->diagnostics));
-      message.exec();
-    }
-    return false;
+    return fail(inspect_result->error, QString::fromUtf8(inspect_result->diagnostics));
   }
 
   std::vector<PJ::ROSBag::TopicInfo> topics;
   QString index_error;
   if (!parseTopicIndex(inspect_result->output, topics, index_error) || topics.empty())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox::critical(
-          nullptr, tr("ROS bag load failed"),
-          index_error.isEmpty() ? tr("The ROS bag does not contain any readable topics.")
-                                : index_error);
-    }
-    return false;
+    return fail(index_error.isEmpty() ? tr("The ROS bag does not contain any readable topics.")
+                                      : index_error);
   }
 
   const QByteArray signature =
@@ -862,12 +807,7 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   topics_file.setAutoRemove(true);
   if (!topics_file.open())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox::critical(nullptr, tr("ROS bag load failed"),
-                            tr("Could not create the temporary topic selection file."));
-    }
-    return false;
+    return fail(tr("Could not create the temporary topic selection file."));
   }
   QJsonArray selected_topics;
   for (const QString& topic : selected_topic_names)
@@ -879,12 +819,7 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   if (topics_file.write(selection_json) != selection_json.size() ||
       !topics_file.flush())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox::critical(nullptr, tr("ROS bag load failed"),
-                            tr("Could not write the temporary topic selection file."));
-    }
-    return false;
+    return fail(tr("Could not write the temporary topic selection file."));
   }
   topics_file.close();
 
@@ -892,24 +827,21 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   stage_timer.restart();
   const QString topics_path = topics_file.fileName();
   const PJ::ParserFactories* factories = parserFactories();
-  const bool use_raw = input_file.suffix().compare(QStringLiteral("bag"), Qt::CaseInsensitive) == 0 &&
-                       factories && factories->find(QStringLiteral("ros1msg")) != factories->end() &&
-                       !qEnvironmentVariableIsSet("RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL") &&
-                       !qEnvironmentVariableIsSet("RSPJ_FORCE_BINARY_ROSBAG_PROTOCOL");
+  const LoadProtocol protocol = selectedLoadProtocol(input_file, factories);
   QFuture<void> load_future = QtConcurrent::run(
-      [python, worker, bag_path, topics_path, max_array, factories, use_raw, load_result]() {
-        if (qEnvironmentVariableIsSet("RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL"))
+      [python, worker, bag_path, topics_path, max_array, factories, protocol, load_result]() {
+        switch (protocol)
         {
-          runTextLoadProcess(python, worker, bag_path, topics_path, max_array, load_result);
-        }
-        else if (use_raw)
-        {
-          runRawLoadProcess(python, worker, bag_path, topics_path, max_array, factories,
-                            load_result);
-        }
-        else
-        {
-          runBinaryLoadProcess(python, worker, bag_path, topics_path, max_array, load_result);
+          case LoadProtocol::Text:
+            runTextLoadProcess(python, worker, bag_path, topics_path, max_array, load_result);
+            break;
+          case LoadProtocol::Raw:
+            runRawLoadProcess(python, worker, bag_path, topics_path, max_array, factories,
+                              load_result);
+            break;
+          case LoadProtocol::Binary:
+            runBinaryLoadProcess(python, worker, bag_path, topics_path, max_array, load_result);
+            break;
         }
       });
   QProgressDialog load_progress(tr("Reading selected ROS bag topics..."), tr("Cancel"), 0, 0);
@@ -930,19 +862,9 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   }
   if (!load_result->error.isEmpty())
   {
-    if (!headlessRosbagLoad())
-    {
-      QMessageBox message(QMessageBox::Critical, tr("ROS bag load failed"),
-                          load_result->error);
-      QStringList details = load_result->warnings;
-      details.append(load_result->metrics);
-      if (!details.isEmpty())
-      {
-        message.setDetailedText(details.join('\n'));
-      }
-      message.exec();
-    }
-    return false;
+    QStringList details = load_result->warnings;
+    details.append(load_result->metrics);
+    return fail(load_result->error, details.join('\n'));
   }
   if (!load_result->warnings.isEmpty() && !headlessRosbagLoad())
   {

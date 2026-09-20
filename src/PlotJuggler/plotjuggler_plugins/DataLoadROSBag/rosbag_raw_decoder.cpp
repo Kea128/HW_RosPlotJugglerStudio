@@ -59,9 +59,8 @@ bool readSizedString(const uint8_t* payload, size_t size, size_t& pos, std::stri
 }
 }  // namespace
 
-RosbagRawDecoder::RosbagRawDecoder(PlotDataMapRef& destination, ParserFactory factory,
-                                   int max_array)
-  : _destination(destination), _factory(std::move(factory)), _max_array(max_array)
+RosbagRawDecoder::RosbagRawDecoder(PlotDataMapRef&, ParserFactory factory, int max_array)
+  : _factory(std::move(factory)), _max_array(max_array)
 {
 }
 

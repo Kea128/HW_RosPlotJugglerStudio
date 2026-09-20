@@ -1,6 +1,6 @@
 """Minimal APSW compatibility layer for local, read-only rosbag2 databases.
 
-RosSignalStudio only opens filesystem paths. The rosbags project uses APSW to
+RosPlotJuggler Studio only opens filesystem paths. The rosbags project uses APSW to
 also support abstract remote paths; Python's standard sqlite3 module is enough
 for our local portable workflow.
 """

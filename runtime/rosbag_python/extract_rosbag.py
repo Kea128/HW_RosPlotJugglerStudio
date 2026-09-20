@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream numeric and string fields from ROS1/ROS2 bags to RosSignalStudio."""
+"""Stream ROS1/ROS2 bag fields or raw ROS1 messages to RosPlotJuggler Studio."""
 
 from __future__ import annotations
 
@@ -281,7 +281,7 @@ class RawWriter:
     def __init__(self, stream: BinaryIO, metrics: StageMetrics) -> None:
         self.stream = stream
         self.metrics = metrics
-        self._chunks: list[bytes] = []
+        self._batch = bytearray()
         self._chunk_bytes = 4
         self._chunk_count = 0
         self.payload_bytes = 0
@@ -313,21 +313,22 @@ class RawWriter:
         self._frame(1, payload)
 
     def emit_message(self, connection_id: int, timestamp: int, rawdata: bytes) -> None:
-        record = struct.pack("<IqI", connection_id, timestamp, len(rawdata)) + rawdata
-        if self._chunks and self._chunk_bytes + len(record) > self.BATCH_LIMIT:
+        extra = 16 + len(rawdata)
+        if self._chunk_count and self._chunk_bytes + extra > self.BATCH_LIMIT:
             self._flush_messages()
-        self._chunks.append(record)
-        self._chunk_bytes += len(record)
+        self._batch.extend(struct.pack("<IqI", connection_id, timestamp, len(rawdata)))
+        self._batch.extend(rawdata)
+        self._chunk_bytes += extra
         self._chunk_count += 1
         self.payload_bytes += len(rawdata)
         if self._chunk_bytes >= self.BATCH_LIMIT:
             self._flush_messages()
 
     def _flush_messages(self) -> None:
-        if not self._chunks:
+        if not self._chunk_count:
             return
-        payload = struct.pack("<I", self._chunk_count) + b"".join(self._chunks)
-        self._chunks.clear()
+        payload = struct.pack("<I", self._chunk_count) + self._batch
+        self._batch.clear()
         self._chunk_bytes = 4
         self._chunk_count = 0
         self._frame(2, payload)
@@ -391,6 +392,93 @@ def print_metrics(metrics: StageMetrics, messages: int, total_seconds: float) ->
         print(f"METRIC\t{name}\t{value:.9f}", file=sys.stderr, flush=True)
 
 
+def note_progress(messages: int, total: int, emitted: int, interval: int) -> None:
+    if messages % interval == 0:
+        print(f"PROGRESS\t{messages}\t{total}\t{emitted}", file=sys.stderr, flush=True)
+
+
+def stream_raw(reader: object, connections: list[object], metrics: StageMetrics) -> tuple[int, int]:
+    raw_writer = RawWriter(sys.stdout.buffer, metrics)
+    for connection in connections:
+        topic = connection.topic.rstrip("/") or "/"
+        schema = connection.msgdef.data if connection.msgdef else ""
+        raw_writer.emit_connection(
+            connection.id, topic, ros1_typename(connection.msgtype), schema
+        )
+    messages = 0
+    waiting_for_first = time.perf_counter()
+    message_stream = reader.messages(connections=connections) if connections else ()
+    total = sum(connection.msgcount for connection in connections)
+    for connection, timestamp, rawdata in message_stream:
+        messages += 1
+        if messages == 1:
+            metrics.first_message_seconds = time.perf_counter() - waiting_for_first
+        raw_writer.emit_message(connection.id, timestamp, rawdata)
+        note_progress(messages, total, messages, 2000)
+    raw_writer.done(messages, messages)
+    return messages, messages
+
+
+def stream_fields(
+    reader: object,
+    connections: list[object],
+    protocol: str,
+    max_array: int,
+    metrics: StageMetrics,
+) -> tuple[int, int]:
+    writer: TextWriter | BinaryWriter = (
+        BinaryWriter(sys.stdout.buffer, metrics)
+        if protocol == "binary-v1"
+        else TextWriter(sys.stdout, metrics)
+    )
+    warned_errors: set[tuple[str, str, type[BaseException]]] = set()
+
+    def warn_once(topic: str, stage: str, error: BaseException) -> None:
+        key = (topic, stage, type(error))
+        if key in warned_errors:
+            return
+        warned_errors.add(key)
+        print(
+            f"WARN\t{encode_name(topic)}\t{stage}: {type(error).__name__}: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    messages = 0
+    emitted = 0
+    waiting_for_first = time.perf_counter()
+    message_stream = reader.messages(connections=connections) if connections else ()
+    total = sum(connection.msgcount for connection in connections)
+    for connection, timestamp, rawdata in message_stream:
+        messages += 1
+        if messages == 1:
+            metrics.first_message_seconds = time.perf_counter() - waiting_for_first
+        sampled = metrics.sample(messages)
+        try:
+            stage_started = time.perf_counter() if sampled else 0.0
+            message = reader.deserialize(rawdata, connection.msgtype)
+            if sampled:
+                metrics.add_deserialize_sample(time.perf_counter() - stage_started)
+        except Exception as error:
+            warn_once(connection.topic, "deserialize", error)
+            continue
+
+        topic = connection.topic.rstrip("/") or "/"
+        try:
+            stage_started = time.perf_counter() if sampled else 0.0
+            for kind, name, value in flatten(message, topic, max_array):
+                writer.emit(kind, timestamp, name, value)
+                emitted += 1
+            if sampled:
+                metrics.add_flatten_sample(time.perf_counter() - stage_started)
+        except Exception as error:
+            warn_once(connection.topic, "flatten", error)
+            continue
+        note_progress(messages, total, emitted, 500)
+    writer.done(messages, emitted)
+    return messages, emitted
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bag")
@@ -403,21 +491,9 @@ def main() -> int:
     bag = resolve_input(Path(args.bag))
     use_raw = args.protocol == "raw-v1"
     metrics = StageMetrics()
-    emitted = 0
     messages = 0
-    warned_errors: set[tuple[str, str, type[BaseException]]] = set()
+    emitted = 0
     started_total = time.perf_counter()
-
-    def warn_once(topic: str, stage: str, error: BaseException) -> None:
-        key = (topic, stage, type(error))
-        if key in warned_errors:
-            return
-        warned_errors.add(key)
-        print(
-            f"WARN\t{encode_name(topic)}\t{stage}: {type(error).__name__}: {error}",
-            file=sys.stderr,
-            flush=True,
-        )
 
     try:
         if use_raw and not is_ros1_bag(bag):
@@ -454,88 +530,12 @@ def main() -> int:
                 file=control_stream,
                 flush=True,
             )
-
             if use_raw:
-                raw_writer = RawWriter(sys.stdout.buffer, metrics)
-                for connection in selected_connections:
-                    topic = connection.topic.rstrip("/") or "/"
-                    schema = connection.msgdef.data if connection.msgdef else ""
-                    raw_writer.emit_connection(
-                        connection.id, topic, ros1_typename(connection.msgtype), schema
-                    )
-                waiting_for_first = time.perf_counter()
-                message_stream = (
-                    reader.messages(connections=selected_connections)
-                    if selected_connections
-                    else ()
-                )
-                for connection, timestamp, rawdata in message_stream:
-                    messages += 1
-                    if messages == 1:
-                        metrics.first_message_seconds = (
-                            time.perf_counter() - waiting_for_first
-                        )
-                    raw_writer.emit_message(connection.id, timestamp, rawdata)
-                    emitted += 1
-                    if messages % 2000 == 0:
-                        print(
-                            f"PROGRESS\t{messages}\t{total}\t{emitted}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                raw_writer.done(messages, emitted)
+                messages, emitted = stream_raw(reader, selected_connections, metrics)
             else:
-                writer: TextWriter | BinaryWriter = (
-                    BinaryWriter(sys.stdout.buffer, metrics)
-                    if args.protocol == "binary-v1"
-                    else TextWriter(sys.stdout, metrics)
+                messages, emitted = stream_fields(
+                    reader, selected_connections, args.protocol, args.max_array, metrics
                 )
-                waiting_for_first = time.perf_counter()
-                message_stream = (
-                    reader.messages(connections=selected_connections)
-                    if selected_connections
-                    else ()
-                )
-                for connection, timestamp, rawdata in message_stream:
-                    messages += 1
-                    if messages == 1:
-                        metrics.first_message_seconds = (
-                            time.perf_counter() - waiting_for_first
-                        )
-                    sampled = metrics.sample(messages)
-                    try:
-                        stage_started = time.perf_counter() if sampled else 0.0
-                        message = reader.deserialize(rawdata, connection.msgtype)
-                        if sampled:
-                            metrics.add_deserialize_sample(
-                                time.perf_counter() - stage_started
-                            )
-                    except Exception as error:
-                        warn_once(connection.topic, "deserialize", error)
-                        continue
-
-                    topic = connection.topic.rstrip("/") or "/"
-                    try:
-                        stage_started = time.perf_counter() if sampled else 0.0
-                        flattened = flatten(message, topic, args.max_array)
-                        for kind, name, value in flattened:
-                            writer.emit(kind, timestamp, name, value)
-                            emitted += 1
-                        if sampled:
-                            metrics.add_flatten_sample(
-                                time.perf_counter() - stage_started
-                            )
-                    except Exception as error:
-                        warn_once(connection.topic, "flatten", error)
-                        continue
-
-                    if messages % 500 == 0:
-                        print(
-                            f"PROGRESS\t{messages}\t{total}\t{emitted}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                writer.done(messages, emitted)
 
         print(f"DONE\t{messages}\t{emitted}", file=sys.stderr, flush=True)
         print_metrics(metrics, messages, time.perf_counter() - started_total)

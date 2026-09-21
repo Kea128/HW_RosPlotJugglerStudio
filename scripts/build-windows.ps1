@@ -52,8 +52,21 @@ $Python = Join-Path $UcrtBin "python.exe"
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "UCRT64 Python not found: $Python"
 }
-& $Python -c "import numpy"
-if ($LASTEXITCODE -ne 0) {
+function Test-UcrtNumpy {
+    & $Python -c "import numpy"
+    return $LASTEXITCODE -eq 0
+}
+if (-not (Test-UcrtNumpy)) {
+    $Bash = Join-Path $ToolchainRoot "usr\bin\bash.exe"
+    if (Test-Path -LiteralPath $Bash -PathType Leaf) {
+        $env:CHERE_INVOKING = "1"
+        & $Bash -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-python-numpy"
+        if (-not (Test-UcrtNumpy)) {
+            & $Bash -lc "pacman -S --noconfirm --nodeps mingw-w64-ucrt-x86_64-gcc-libgfortran mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-python-numpy"
+        }
+    }
+}
+if (-not (Test-UcrtNumpy)) {
     throw "UCRT64 Python cannot import numpy: $Python"
 }
 $env:RSPJ_PYTHON = $Python

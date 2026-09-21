@@ -26,7 +26,15 @@ QString pythonExecutable()
   {
     return configured;
   }
-  return QStandardPaths::findExecutable(QStringLiteral("python"));
+  for (const QString& name : { QStringLiteral("python3"), QStringLiteral("python") })
+  {
+    const QString found = QStandardPaths::findExecutable(name);
+    if (!found.isEmpty())
+    {
+      return found;
+    }
+  }
+  return {};
 }
 
 QProcessEnvironment workerEnvironment()

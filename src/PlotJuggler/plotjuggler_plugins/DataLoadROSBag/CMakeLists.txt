@@ -79,7 +79,14 @@ if(BUILD_TESTING)
       rosbag_record_parser
       parser_ros_core
       GTest::gtest_main)
-    gtest_discover_tests(test_rosbag_worker_e2e)
+    get_filename_component(ROSBAG_E2E_PYTHON_HINT "${CMAKE_COMMAND}" DIRECTORY)
+    set(ROSBAG_E2E_PYTHON "${ROSBAG_E2E_PYTHON_HINT}/python.exe")
+    if(EXISTS "${ROSBAG_E2E_PYTHON}")
+      gtest_discover_tests(test_rosbag_worker_e2e PROPERTIES
+        ENVIRONMENT "RSPJ_PYTHON=${ROSBAG_E2E_PYTHON}")
+    else()
+      gtest_discover_tests(test_rosbag_worker_e2e)
+    endif()
 
     add_executable(test_rosbag_raw_decoder tests/test_rosbag_raw_decoder.cpp)
     target_link_libraries(test_rosbag_raw_decoder PRIVATE

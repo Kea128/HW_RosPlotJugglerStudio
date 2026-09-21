@@ -48,6 +48,7 @@ function Invoke-Checked {
 $env:PATH = "$UcrtBin;$env:PATH"
 $env:CMAKE_PREFIX_PATH = Join-Path $ToolchainRoot "ucrt64"
 $env:MSYSTEM = "UCRT64"
+$env:RSPJ_PYTHON = Join-Path $UcrtBin "python.exe"
 
 if (-not $NoClean) {
     foreach ($OutputDirectory in @($BuildDirectory, $InstallDirectory)) {

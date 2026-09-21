@@ -19,22 +19,63 @@
 namespace
 {
 
+bool pythonImportsNumpy(const QString& python)
+{
+  if (python.isEmpty() || !QFileInfo::exists(python))
+  {
+    return false;
+  }
+  QProcess process;
+  process.start(python, { QStringLiteral("-c"), QStringLiteral("import numpy") });
+  if (!process.waitForStarted(10000) || !process.waitForFinished(30000))
+  {
+    process.kill();
+    process.waitForFinished(3000);
+    return false;
+  }
+  return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+}
+
 QString pythonExecutable()
 {
+  QStringList candidates;
+#ifdef ROSBAG_E2E_PYTHON
+  candidates << QString::fromUtf8(ROSBAG_E2E_PYTHON);
+#endif
   const QString configured = qEnvironmentVariable("RSPJ_PYTHON");
-  if (!configured.isEmpty() && QFile::exists(configured))
+  if (!configured.isEmpty())
   {
-    return configured;
+    candidates << configured;
   }
   for (const QString& name : { QStringLiteral("python3"), QStringLiteral("python") })
   {
     const QString found = QStandardPaths::findExecutable(name);
     if (!found.isEmpty())
     {
-      return found;
+      candidates << found;
     }
   }
-  return {};
+
+  QString fallback;
+  QStringList seen;
+  for (const QString& candidate : candidates)
+  {
+    const QString resolved = QFileInfo(candidate).absoluteFilePath();
+    if (resolved.isEmpty() || seen.contains(resolved) || !QFileInfo::exists(resolved))
+    {
+      continue;
+    }
+    seen << resolved;
+    if (fallback.isEmpty())
+    {
+      fallback = resolved;
+    }
+    if (pythonImportsNumpy(resolved))
+    {
+      return resolved;
+    }
+  }
+  return fallback;
 }
 
 QProcessEnvironment workerEnvironment()

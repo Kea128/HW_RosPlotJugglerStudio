@@ -79,14 +79,26 @@ if(BUILD_TESTING)
       rosbag_record_parser
       parser_ros_core
       GTest::gtest_main)
-    get_filename_component(ROSBAG_E2E_PYTHON_HINT "${CMAKE_COMMAND}" DIRECTORY)
-    set(ROSBAG_E2E_PYTHON "${ROSBAG_E2E_PYTHON_HINT}/python.exe")
-    if(EXISTS "${ROSBAG_E2E_PYTHON}")
-      gtest_discover_tests(test_rosbag_worker_e2e PROPERTIES
-        ENVIRONMENT "RSPJ_PYTHON=${ROSBAG_E2E_PYTHON}")
+    set(ROSBAG_E2E_PYTHON "")
+    if(RSPJ_PYTHON AND EXISTS "${RSPJ_PYTHON}")
+      set(ROSBAG_E2E_PYTHON "${RSPJ_PYTHON}")
+    elseif(DEFINED ENV{RSPJ_PYTHON} AND EXISTS "$ENV{RSPJ_PYTHON}")
+      set(ROSBAG_E2E_PYTHON "$ENV{RSPJ_PYTHON}")
     else()
-      gtest_discover_tests(test_rosbag_worker_e2e)
+      get_filename_component(ROSBAG_E2E_PYTHON_HINT "${CMAKE_COMMAND}" DIRECTORY)
+      foreach(ROSBAG_E2E_PYTHON_NAME python.exe python3 python)
+        if(EXISTS "${ROSBAG_E2E_PYTHON_HINT}/${ROSBAG_E2E_PYTHON_NAME}")
+          set(ROSBAG_E2E_PYTHON "${ROSBAG_E2E_PYTHON_HINT}/${ROSBAG_E2E_PYTHON_NAME}")
+          break()
+        endif()
+      endforeach()
     endif()
+    if(ROSBAG_E2E_PYTHON)
+      file(TO_CMAKE_PATH "${ROSBAG_E2E_PYTHON}" ROSBAG_E2E_PYTHON)
+      target_compile_definitions(test_rosbag_worker_e2e PRIVATE
+        ROSBAG_E2E_PYTHON="${ROSBAG_E2E_PYTHON}")
+    endif()
+    gtest_discover_tests(test_rosbag_worker_e2e)
 
     add_executable(test_rosbag_raw_decoder tests/test_rosbag_raw_decoder.cpp)
     target_link_libraries(test_rosbag_raw_decoder PRIVATE

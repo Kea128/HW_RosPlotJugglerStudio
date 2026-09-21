@@ -48,7 +48,15 @@ function Invoke-Checked {
 $env:PATH = "$UcrtBin;$env:PATH"
 $env:CMAKE_PREFIX_PATH = Join-Path $ToolchainRoot "ucrt64"
 $env:MSYSTEM = "UCRT64"
-$env:RSPJ_PYTHON = Join-Path $UcrtBin "python.exe"
+$Python = Join-Path $UcrtBin "python.exe"
+if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
+    throw "UCRT64 Python not found: $Python"
+}
+& $Python -c "import numpy"
+if ($LASTEXITCODE -ne 0) {
+    throw "UCRT64 Python cannot import numpy: $Python"
+}
+$env:RSPJ_PYTHON = $Python
 
 if (-not $NoClean) {
     foreach ($OutputDirectory in @($BuildDirectory, $InstallDirectory)) {
@@ -67,7 +75,8 @@ $ConfigureArguments = @(
     "-DCMAKE_INSTALL_PREFIX=$InstallDirectory",
     "-DCMAKE_PREFIX_PATH=$env:CMAKE_PREFIX_PATH",
     "-DBUILD_TESTING=ON",
-    "-DPJ_BUILD_MOSAICO_PLUGIN=$(if ($EnableMosaico) { 'ON' } else { 'OFF' })"
+    "-DPJ_BUILD_MOSAICO_PLUGIN=$(if ($EnableMosaico) { 'ON' } else { 'OFF' })",
+    "-DRSPJ_PYTHON=$($Python.Replace('\', '/'))"
 )
 foreach ($Dependency in @("data_tamer", "lz4", "wasmer")) {
     $CachedSource = Join-Path $DependencyCacheDirectory "$Dependency-src"

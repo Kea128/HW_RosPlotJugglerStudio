@@ -36,6 +36,7 @@ namespace
 {
 constexpr qsizetype MAX_PENDING_RECORD_BYTES = 16 * 1024 * 1024;
 constexpr qsizetype MAX_INSPECT_BYTES = 16 * 1024 * 1024;
+constexpr qsizetype MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 
 bool headlessRosbagLoad()
 {
@@ -57,6 +58,7 @@ struct LoadResult
   QString error;
   QStringList warnings;
   QStringList metrics;
+  QByteArray diagnostics;
   std::atomic<qint64> current{ 0 };
   std::atomic<qint64> total{ 0 };
   std::atomic<bool> cancel_requested{ false };
@@ -68,6 +70,18 @@ struct LoadResult
   bool canceled = false;
 };
 
+struct PythonRuntime
+{
+  QString executable;
+  bool bundled = false;
+};
+
+bool hasBundledPackages(const QFileInfo& worker)
+{
+  return QFileInfo::exists(
+      worker.dir().filePath(QStringLiteral("rosbags/highlevel/__init__.py")));
+}
+
 QString findWorker()
 {
   const QString application_dir = QCoreApplication::applicationDirPath();
@@ -78,39 +92,73 @@ QString findWorker()
     QString::fromUtf8(ROSBAG_PYTHON_WORKER_SOURCE),
 #endif
   };
+  QString worker_without_packages;
   for (const QString& candidate : candidates)
   {
     const QFileInfo info(candidate);
-    if (info.isFile() && info.isReadable())
+    if (!info.isFile() || !info.isReadable())
+    {
+      continue;
+    }
+    if (hasBundledPackages(info))
     {
       return info.canonicalFilePath();
     }
+    if (worker_without_packages.isEmpty())
+    {
+      worker_without_packages = info.canonicalFilePath();
+    }
   }
-  return {};
+  return worker_without_packages;
 }
 
-QString findPython()
+PythonRuntime findPython()
 {
+  const QString bundled =
+      QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("python.exe"));
+  const QFileInfo bundled_info(bundled);
+  const auto runtime = [&bundled_info](const QString& executable) {
+    const QFileInfo info(executable);
+    return PythonRuntime{ executable, bundled_info.exists() &&
+                                          info.canonicalFilePath().compare(
+                                              bundled_info.canonicalFilePath(),
+                                              Qt::CaseInsensitive) == 0 };
+  };
+
   const QString configured = qEnvironmentVariable("RSPJ_PYTHON");
   if (!configured.isEmpty() && QFileInfo::exists(configured))
   {
-    return configured;
+    return runtime(configured);
   }
-  const QString bundled =
-      QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("python.exe"));
-  if (QFileInfo::exists(bundled))
+  if (bundled_info.exists())
   {
-    return bundled;
+    return runtime(bundled);
   }
   for (const QString& name : { QStringLiteral("python3"), QStringLiteral("python") })
   {
     const QString executable = QStandardPaths::findExecutable(name);
     if (!executable.isEmpty())
     {
-      return executable;
+      return runtime(executable);
     }
   }
   return {};
+}
+
+QProcessEnvironment workerEnvironment(const PythonRuntime& python)
+{
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  // Windows pipes otherwise use the ANSI code page, but worker output is parsed as UTF-8.
+  environment.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
+  if (python.bundled)
+  {
+    // A sourced ROS or Conda shell must not redirect the packaged interpreter to another
+    // installation's standard library or site-packages.
+    environment.remove(QStringLiteral("PYTHONHOME"));
+    environment.remove(QStringLiteral("PYTHONPATH"));
+    environment.insert(QStringLiteral("PYTHONNOUSERSITE"), QStringLiteral("1"));
+  }
+  return environment;
 }
 
 QByteArray normalizedLine(QByteArray line)
@@ -125,26 +173,69 @@ QByteArray normalizedLine(QByteArray line)
 template <typename Callback>
 void consumeLines(QByteArray& buffer, Callback callback)
 {
+  qsizetype start = 0;
   qsizetype newline = -1;
-  while ((newline = buffer.indexOf('\n')) >= 0)
+  while ((newline = buffer.indexOf('\n', start)) >= 0)
   {
-    const QByteArray line = normalizedLine(buffer.left(newline));
-    buffer.remove(0, newline + 1);
+    const QByteArray line = normalizedLine(buffer.mid(start, newline - start));
+    start = newline + 1;
     if (!line.isEmpty())
     {
       callback(line);
     }
   }
+  buffer.remove(0, start);
 }
 
-void runInspectProcess(const QString& python, const QString& worker, const QString& bag,
+void appendDiagnostic(QByteArray& diagnostics, const QByteArray& line)
+{
+  diagnostics += line;
+  diagnostics += '\n';
+  if (diagnostics.size() > MAX_DIAGNOSTIC_BYTES)
+  {
+    diagnostics.remove(0, diagnostics.size() - MAX_DIAGNOSTIC_BYTES);
+  }
+}
+
+QString workerFailureSummary(const QByteArray& diagnostics)
+{
+  QByteArray last_line;
+  for (const QByteArray& raw_line : diagnostics.split('\n'))
+  {
+    const QByteArray line = normalizedLine(raw_line).trimmed();
+    if (line.startsWith("ERROR\t"))
+    {
+      return QString::fromUtf8(line.mid(6)).trimmed();
+    }
+    if (!line.isEmpty() && !line.startsWith("METRIC\t"))
+    {
+      last_line = line;
+    }
+  }
+  return QString::fromUtf8(last_line);
+}
+
+QString workerExitError(const QProcess& process, const QByteArray& diagnostics)
+{
+  const QString exit_status = process.exitStatus() == QProcess::NormalExit
+                                  ? QStringLiteral("ROS bag worker exited with code %1.")
+                                        .arg(process.exitCode())
+                                  : QStringLiteral("ROS bag worker terminated unexpectedly: %1")
+                                        .arg(process.errorString());
+  const QString summary = workerFailureSummary(diagnostics);
+  return summary.isEmpty() ? exit_status
+                           : summary.left(2000) + QStringLiteral("\n\n") + exit_status;
+}
+
+void runInspectProcess(const PythonRuntime& python, const QString& worker, const QString& bag,
                        const std::shared_ptr<InspectResult>& result,
                        const std::shared_ptr<std::atomic<bool>>& cancel_requested)
 {
   QProcess process;
   process.setProcessChannelMode(QProcess::SeparateChannels);
-  process.start(
-      python, { QStringLiteral("-u"), worker, bag, QStringLiteral("--inspect") });
+  process.setProcessEnvironment(workerEnvironment(python));
+  process.start(python.executable,
+                { QStringLiteral("-u"), worker, bag, QStringLiteral("--inspect") });
   if (!process.waitForStarted(10000))
   {
     result->error =
@@ -179,13 +270,7 @@ void runInspectProcess(const QString& python, const QString& worker, const QStri
   if (!result->canceled && result->error.isEmpty() &&
       (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0))
   {
-    result->error =
-        QString::fromUtf8(result->diagnostics).trimmed().left(2000);
-    if (result->error.isEmpty())
-    {
-      result->error =
-          QStringLiteral("ROS bag worker exited with code %1.").arg(process.exitCode());
-    }
+    result->error = workerExitError(process, result->diagnostics);
   }
 }
 
@@ -292,6 +377,10 @@ void consumeControlLine(const QByteArray& line, const std::shared_ptr<LoadResult
       result->done = true;
     }
   }
+  else
+  {
+    appendDiagnostic(result->diagnostics, line);
+  }
 }
 
 QStringList workerArguments(const QString& worker, const QString& bag, const QString& protocol,
@@ -305,13 +394,14 @@ QStringList workerArguments(const QString& worker, const QString& bag, const QSt
 }
 
 template <typename OnStdout>
-void runWorkerProcess(const QString& python, const QStringList& arguments,
+void runWorkerProcess(const PythonRuntime& python, const QStringList& arguments,
                       const std::shared_ptr<LoadResult>& result, OnStdout on_stdout,
                       bool line_buffered_stdout)
 {
   QProcess process;
   process.setProcessChannelMode(QProcess::SeparateChannels);
-  process.start(python, arguments);
+  process.setProcessEnvironment(workerEnvironment(python));
+  process.start(python.executable, arguments);
   if (!process.waitForStarted(10000))
   {
     result->error =
@@ -390,13 +480,11 @@ void runWorkerProcess(const QString& python, const QStringList& arguments,
   if (result->error.isEmpty() &&
       (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0))
   {
-    result->error = QStringLiteral("ROS bag worker exited with code %1: %2")
-                        .arg(process.exitCode())
-                        .arg(process.errorString());
+    result->error = workerExitError(process, result->diagnostics);
   }
 }
 
-void runBinaryLoadProcess(const QString& python, const QString& worker, const QString& bag,
+void runBinaryLoadProcess(const PythonRuntime& python, const QString& worker, const QString& bag,
                           const QString& topics_file, int max_array,
                           const std::shared_ptr<LoadResult>& result)
 {
@@ -437,19 +525,27 @@ void runBinaryLoadProcess(const QString& python, const QString& worker, const QS
   result->current.store(static_cast<qint64>(decoder.messages()), std::memory_order_relaxed);
 }
 
-void runRawLoadProcess(const QString& python, const QString& worker, const QString& bag,
+void runRawLoadProcess(const PythonRuntime& python, const QString& worker, const QString& bag,
                        const QString& topics_file, int max_array,
-                       const PJ::ParserFactories* factories,
+                       const PJ::ParserFactories* factories, const QString& parser_encoding,
                        const std::shared_ptr<LoadResult>& result)
 {
-  auto create_parser = [factories, result](const std::string& topic, const std::string& type,
-                                           const std::string& schema) -> PJ::MessageParserPtr {
+  auto create_parser = [factories, parser_encoding, result](
+                           const std::string& topic, const std::string& type,
+                           const std::string& schema) -> PJ::MessageParserPtr {
     if (!factories)
     {
       return {};
     }
-    const auto found = factories->find(QStringLiteral("ros1msg"));
+    const auto found = factories->find(parser_encoding);
     if (found == factories->end())
+    {
+      return {};
+    }
+    // rosbag2 may store a definition only as IDL or not at all; a ros2msg parser built from an
+    // empty definition accepts every message and decodes nothing.
+    if (schema.empty() && parser_encoding == QLatin1String("ros2msg") &&
+        type != "std_msgs/msg/Empty")
     {
       return {};
     }
@@ -516,13 +612,16 @@ void runRawLoadProcess(const QString& python, const QString& worker, const QStri
     return;
   }
   fallback_topics.close();
-  result->warnings.push_back(
-      QStringLiteral("WARN\traw-v1\tfalling back to binary-v1 for %1 topic(s)")
-          .arg(decoder.failedTopics().size()));
+  for (const QString& reason : decoder.failureReasons())
+  {
+    result->metrics.push_back(QStringLiteral("FALLBACK\tbinary-v1\t%1").arg(reason));
+  }
 
   const uint64_t raw_info = result->info_messages;
   const uint64_t raw_done_messages = result->done_messages;
   const uint64_t raw_done_emitted = result->done_emitted;
+  result->info_received = false;
+  result->done = false;
   runBinaryLoadProcess(python, worker, bag, fallback_topics.fileName(), max_array, result);
   if (result->error.isEmpty())
   {
@@ -534,7 +633,7 @@ void runRawLoadProcess(const QString& python, const QString& worker, const QStri
   }
 }
 
-void runTextLoadProcess(const QString& python, const QString& worker, const QString& bag,
+void runTextLoadProcess(const PythonRuntime& python, const QString& worker, const QString& bag,
                         const QString& topics_file, int max_array,
                         const std::shared_ptr<LoadResult>& result)
 {
@@ -680,6 +779,14 @@ enum class LoadProtocol
   Raw
 };
 
+QString rawParserEncoding(const QFileInfo& input_file)
+{
+  // Everything that is not a ROS1 .bag is a rosbag2 storage file carrying CDR messages.
+  return input_file.suffix().compare(QStringLiteral("bag"), Qt::CaseInsensitive) == 0
+             ? QStringLiteral("ros1msg")
+             : QStringLiteral("ros2msg");
+}
+
 LoadProtocol selectedLoadProtocol(const QFileInfo& input_file,
                                   const PJ::ParserFactories* factories)
 {
@@ -687,9 +794,8 @@ LoadProtocol selectedLoadProtocol(const QFileInfo& input_file,
   {
     return LoadProtocol::Text;
   }
-  if (!qEnvironmentVariableIsSet("RSPJ_FORCE_BINARY_ROSBAG_PROTOCOL") &&
-      input_file.suffix().compare(QStringLiteral("bag"), Qt::CaseInsensitive) == 0 &&
-      factories && factories->find(QStringLiteral("ros1msg")) != factories->end())
+  if (!qEnvironmentVariableIsSet("RSPJ_FORCE_BINARY_ROSBAG_PROTOCOL") && factories &&
+      factories->find(rawParserEncoding(input_file)) != factories->end())
   {
     return LoadProtocol::Raw;
   }
@@ -730,13 +836,13 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   }
 
   const QString worker = findWorker();
-  const QString python = findPython();
+  const PythonRuntime python = findPython();
   if (worker.isEmpty())
   {
     return fail(
         tr("The packaged ROS bag worker was not found (runtime/rosbag_python/extract_rosbag.py)."));
   }
-  if (python.isEmpty())
+  if (python.executable.isEmpty())
   {
     return fail(tr("Python 3 was not found. Set RSPJ_PYTHON to a Python executable "
                    "with the 'rosbags' and 'numpy' packages installed."));
@@ -828,8 +934,10 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   const QString topics_path = topics_file.fileName();
   const PJ::ParserFactories* factories = parserFactories();
   const LoadProtocol protocol = selectedLoadProtocol(input_file, factories);
+  const QString parser_encoding = rawParserEncoding(input_file);
   QFuture<void> load_future = QtConcurrent::run(
-      [python, worker, bag_path, topics_path, max_array, factories, protocol, load_result]() {
+      [python, worker, bag_path, topics_path, max_array, factories, protocol, parser_encoding,
+       load_result]() {
         switch (protocol)
         {
           case LoadProtocol::Text:
@@ -837,7 +945,7 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
             break;
           case LoadProtocol::Raw:
             runRawLoadProcess(python, worker, bag_path, topics_path, max_array, factories,
-                              load_result);
+                              parser_encoding, load_result);
             break;
           case LoadProtocol::Binary:
             runBinaryLoadProcess(python, worker, bag_path, topics_path, max_array, load_result);
@@ -863,6 +971,10 @@ bool DataLoadROSBag::readDataFromFile(PJ::FileLoadInfo* fileload_info,
   if (!load_result->error.isEmpty())
   {
     QStringList details = load_result->warnings;
+    if (!load_result->diagnostics.isEmpty())
+    {
+      details.append(QString::fromUtf8(load_result->diagnostics).trimmed());
+    }
     details.append(load_result->metrics);
     return fail(load_result->error, details.join('\n'));
   }

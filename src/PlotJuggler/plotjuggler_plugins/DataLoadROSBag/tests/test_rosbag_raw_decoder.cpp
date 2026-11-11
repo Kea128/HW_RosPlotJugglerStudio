@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -207,5 +209,119 @@ TEST(RosbagRawDecoder, RecordsFailedTopicsWhenFactoryReturnsNull)
   ASSERT_TRUE(decoder.finish());
   ASSERT_EQ(decoder.failedTopics().size(), 1);
   EXPECT_EQ(decoder.failedTopics().front(), "/custom");
+}
+
+class ScriptedParser : public PJ::MessageParser
+{
+public:
+  ScriptedParser(const std::string& topic, PJ::PlotDataMapRef& data, std::vector<bool> outcomes)
+    : PJ::MessageParser(topic, data), _outcomes(std::move(outcomes))
+  {
+  }
+
+  bool parseMessage(const PJ::MessageRef, double& timestamp) override
+  {
+    const bool ok = calls < _outcomes.size() && _outcomes[calls];
+    calls++;
+    getSeries(_topic_name + "/first_field").pushBack({ timestamp, 1.0 });
+    if (!ok)
+    {
+      throw std::runtime_error("bad message");
+    }
+    getSeries(_topic_name + "/value").pushBack({ timestamp, 1.0 });
+    return true;
+  }
+
+  size_t calls = 0;
+
+private:
+  std::vector<bool> _outcomes;
+};
+
+Bytes twoMessagesOn(uint32_t id)
+{
+  Bytes stream = header();
+  frame(stream, 1, connection(id, "/scripted", "pkg/Msg", "int32 data\n"));
+  frame(stream, 2, oneMessage(id, 1000000000, Bytes{ 1 }));
+  frame(stream, 2, oneMessage(id, 2000000000, Bytes{ 2 }));
+  frame(stream, 3, done(2, 2));
+  return stream;
+}
+
+TEST(RosbagRawDecoder, HandsTopicToFallbackWhenItsFirstMessageFails)
+{
+  PJ::PlotDataMapRef data;
+  std::shared_ptr<ScriptedParser> parser;
+  PJ::ROSBag::RosbagRawDecoder decoder(
+      data,
+      [&](const std::string& topic, const std::string&, const std::string&) {
+        parser = std::make_shared<ScriptedParser>(topic, data, std::vector<bool>{ false, true });
+        return parser;
+      },
+      16);
+
+  const Bytes stream = twoMessagesOn(4);
+  ASSERT_TRUE(decoder.append(stream.data(), stream.size()));
+  ASSERT_TRUE(decoder.finish());
+  EXPECT_EQ(decoder.messages(), 2u);
+  ASSERT_EQ(decoder.failedTopics(), QStringList{ "/scripted" });
+  ASSERT_EQ(decoder.failureReasons().size(), 1);
+  EXPECT_TRUE(decoder.failureReasons().front().contains("bad message"));
+  EXPECT_TRUE(decoder.warnings().isEmpty());
+  EXPECT_EQ(parser->calls, 1u);
+  EXPECT_EQ(data.numeric.count("/scripted/first_field"), 0u);
+  EXPECT_EQ(data.numeric.count("/scripted/value"), 0u);
+}
+
+TEST(RosbagRawDecoder, KeepsTopicWhenAnotherConnectionAlreadyDecodedIt)
+{
+  PJ::PlotDataMapRef data;
+  PJ::ROSBag::RosbagRawDecoder decoder(
+      data,
+      [&](const std::string& topic, const std::string&, const std::string& schema) {
+        if (schema.empty())
+        {
+          return std::shared_ptr<ScriptedParser>{};
+        }
+        return std::make_shared<ScriptedParser>(
+            topic, data, std::vector<bool>{ schema == "good\n" });
+      },
+      16);
+
+  Bytes stream = header();
+  frame(stream, 1, connection(1, "/scripted", "pkg/Msg", "good\n"));
+  frame(stream, 1, connection(2, "/scripted", "pkg/Msg", "bad\n"));
+  frame(stream, 2, oneMessage(1, 1000000000, Bytes{ 1 }));
+  frame(stream, 2, oneMessage(2, 2000000000, Bytes{ 2 }));
+  frame(stream, 1, connection(3, "/scripted", "pkg/Msg", ""));
+  frame(stream, 2, oneMessage(3, 3000000000, Bytes{ 3 }));
+  frame(stream, 3, done(3, 3));
+  ASSERT_TRUE(decoder.append(stream.data(), stream.size()));
+  ASSERT_TRUE(decoder.finish());
+  EXPECT_TRUE(decoder.failedTopics().isEmpty());
+  EXPECT_EQ(decoder.warnings().size(), 1);
+  ASSERT_EQ(data.numeric.count("/scripted/value"), 1u);
+  EXPECT_EQ(data.numeric.at("/scripted/value").size(), 1u);
+}
+
+TEST(RosbagRawDecoder, KeepsDecodedDataWhenALaterMessageFails)
+{
+  PJ::PlotDataMapRef data;
+  PJ::ROSBag::RosbagRawDecoder decoder(
+      data,
+      [&](const std::string& topic, const std::string&, const std::string&) {
+        return std::make_shared<ScriptedParser>(topic, data, std::vector<bool>{ true, false });
+      },
+      16);
+
+  const Bytes stream = twoMessagesOn(5);
+  ASSERT_TRUE(decoder.append(stream.data(), stream.size()));
+  ASSERT_TRUE(decoder.finish());
+  EXPECT_TRUE(decoder.failedTopics().isEmpty());
+  ASSERT_EQ(decoder.warnings().size(), 1);
+  EXPECT_TRUE(decoder.warnings().front().contains("bad message"));
+  ASSERT_EQ(data.numeric.count("/scripted/value"), 1u);
+  EXPECT_EQ(data.numeric.at("/scripted/value").size(), 1u);
+  EXPECT_EQ(data.numeric.at("/scripted/first_field").size(), 2u);
 }
 }  // namespace

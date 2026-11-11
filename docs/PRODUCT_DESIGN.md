@@ -161,7 +161,9 @@ PlotJuggler 的数据加载、数据流、解析器、绘图、布局、回放�
 3. 第一阶段采用 Python worker，稳定后评估 C++ 热路径。
 
 当前实现采用第 1 条：先异步读取 Topic 索引并允许用户筛选，再由后台 worker
-源头过滤 connection，通过 `binary-v1` 有界列式帧增量解码。标准 MCAP 使用第
+源头过滤 connection。ROS1 与 ROS2 SQLite3 包通过 `raw-v1` 只传原始消息字节，
+由 C++ `ParserROS` 解码；没有可用 schema 或 C++ 无法解码的 Topic 回退
+`binary-v1` 有界列式帧，由 Python 反序列化并展开。标准 MCAP 使用第
 2 条已有的原生 loader；Python MCAP 仅作为显式 fallback。加载阶段保持 UI
 可响应、支持取消，并记录阶段指标供现场性能诊断。设置
 `RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL=1` 可切换到旧文本协议；原生 MCAP 遇到

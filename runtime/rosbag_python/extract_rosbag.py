@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
-"""Stream ROS1/ROS2 bag fields or raw ROS1 messages to RosPlotJuggler Studio."""
+"""Stream ROS1/ROS2 bag fields or raw serialized messages to RosPlotJuggler Studio."""
 
 from __future__ import annotations
 
 import argparse
 import base64
 import dataclasses
+import heapq
 import json
 import math
+import os
 import struct
 import sys
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO, TextIO
 from urllib.parse import quote
 
 import numpy as np
 from rosbags.highlevel import AnyReader
+from rosbags.interfaces import MessageDefinitionFormat
 from rosbags.rosbag1 import Reader as Ros1Reader
-from rosbags.typesys import Stores, get_typestore
+from rosbags.rosbag1 import ReaderError as Ros1ReaderError
+from rosbags.rosbag1.reader import Header, RecordType, decompressors, read_bytes, read_uint32
+from rosbags.rosbag2 import Reader as Ros2Reader
+from rosbags.typesys import Stores, TypesysError, get_typestore
 
 
 def array_limit(value: str) -> int:
@@ -51,7 +59,8 @@ def encode_name(name: str) -> str:
 
 
 def flatten(value: object, prefix: str, max_array: int) -> Iterator[tuple[str, str, object]]:
-    if isinstance(value, (bool, int, float, np.number)):
+    # np.bool_ is not an np.number, so it must be listed explicitly.
+    if isinstance(value, (bool, int, float, np.number, np.bool_)):
         number = float(value)
         if math.isfinite(number):
             yield "N", prefix, number
@@ -71,7 +80,14 @@ def flatten(value: object, prefix: str, max_array: int) -> Iterator[tuple[str, s
         if value.ndim == 0:
             yield from flatten(value.item(), prefix, max_array)
             return
-        for index, child in enumerate(value.flat[:max_array]):
+        items = value.flat[:max_array].tolist()
+        if value.dtype.kind in "biuf":
+            for index, item in enumerate(items):
+                number = float(item)
+                if math.isfinite(number):
+                    yield "N", array_path(prefix, index), number
+            return
+        for index, child in enumerate(items):
             yield from flatten(child, array_path(prefix, index), max_array)
         return
 
@@ -92,11 +108,136 @@ def is_ros1_bag(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() == ".bag"
 
 
+def is_ros2_bag(path: Path) -> bool:
+    return path.is_dir() and (path / "metadata.yaml").exists()
+
+
 def ros1_typename(msgtype: str) -> str:
     parts = msgtype.split("/")
     if len(parts) >= 3 and parts[-2] == "msg":
         return "/".join((*parts[:-2], parts[-1]))
     return msgtype
+
+
+CHUNK_CACHE_BYTES = 512 * 1024 * 1024
+
+
+def iter_ros1_messages(
+    reader: Ros1Reader, connections: list[object]
+) -> Iterator[tuple[object, int, bytes]]:
+    """Yield (connection, time, rawdata) in time order, like Reader.messages().
+
+    Reader.messages() keeps one decompressed chunk, so bags whose chunk time ranges
+    overlap (header-stamped writes, merged recordings, sim time) re-read and
+    re-decompress a chunk for almost every message; with bz2 this is hundreds of
+    times slower. Here each chunk is decompressed once, kept until its selected
+    messages are consumed, and compressed chunks are decompressed ahead on threads.
+    """
+    if not connections:
+        return
+    assert reader.bio is not None
+    bio = reader.bio
+    selected = {connection.id for connection in connections}  # type: ignore[attr-defined]
+    remaining: dict[int, int] = {}
+    for info in reader.chunk_infos:
+        count = sum(n for conn, n in info.connection_counts.items() if conn in selected)
+        if count:
+            remaining[info.pos] = count
+    upcoming = deque(
+        info.pos
+        for info in sorted(reader.chunk_infos, key=lambda info: info.start_time)
+        if info.pos in remaining
+    )
+    identity = decompressors["none"]
+    compressed = any(reader.chunks[pos].decompressor is not identity for pos in remaining)
+    workers = min(8, os.cpu_count() or 1) if compressed else 0
+    pool = ThreadPoolExecutor(max_workers=workers) if workers else None
+    pending: dict[int, Future[bytes]] = {}
+    cache: OrderedDict[int, tuple[BytesIO, int]] = OrderedDict()
+    cached_bytes = 0
+    connmap = {connection.id: connection for connection in reader.connections}
+
+    def read_compressed(pos: int) -> bytes:
+        chunk = reader.chunks[pos]
+        _ = bio.seek(chunk.datapos)
+        return read_bytes(bio, chunk.datasize)
+
+    def prefetch() -> None:
+        while pool is not None and upcoming and len(pending) < 2 * workers:
+            pos = upcoming.popleft()
+            if pos not in cache and pos not in pending:
+                pending[pos] = pool.submit(reader.chunks[pos].decompressor, read_compressed(pos))
+
+    try:
+        indexes = [reader.indexes[connection.id] for connection in connections]  # type: ignore[attr-defined]
+        for entry in heapq.merge(*indexes):
+            pos = entry.chunk_pos
+            cached = cache.get(pos)
+            if cached is None:
+                prefetch()
+                future = pending.pop(pos, None)
+                raw = (
+                    future.result()
+                    if future is not None
+                    else reader.chunks[pos].decompressor(read_compressed(pos))
+                )
+                cached = (BytesIO(raw), len(raw))
+                cache[pos] = cached
+                cached_bytes += len(raw)
+                while cached_bytes > CHUNK_CACHE_BYTES and len(cache) > 1:
+                    cached_bytes -= cache.popitem(last=False)[1][1]
+            else:
+                cache.move_to_end(pos)
+            prefetch()
+            chunk_data = cached[0]
+
+            _ = chunk_data.seek(entry.offset)
+            while True:
+                header = Header.read(chunk_data)
+                record_type = header.get_uint8("op")
+                if record_type != RecordType.CONNECTION:
+                    break
+                _ = chunk_data.seek(read_uint32(chunk_data), os.SEEK_CUR)
+            if record_type != RecordType.MSGDATA:
+                raise Ros1ReaderError("Expected to find message data.")
+            rawdata = read_bytes(chunk_data, read_uint32(chunk_data))
+            connection = connmap[header.get_uint32("conn")]
+
+            left = remaining.get(pos, 0) - 1
+            remaining[pos] = left
+            if left == 0 and pos in cache:
+                cached_bytes -= cache.pop(pos)[1]
+            yield connection, entry.time, rawdata
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+
+class Ros2Schemas:
+    """Provide ros2msg definitions for raw CDR streaming."""
+
+    def __init__(self) -> None:
+        self._typestore: object | None = None
+
+    def schema(self, connection: object) -> str:
+        """Return the definition, or "" so the topic falls back to binary-v1."""
+        if connection.ext.serialization_format != "cdr":  # type: ignore[attr-defined]
+            return ""
+        msgdef = connection.msgdef  # type: ignore[attr-defined]
+        if msgdef.format == MessageDefinitionFormat.MSG and msgdef.data:
+            return msgdef.data
+        if msgdef.format != MessageDefinitionFormat.NONE:
+            return ""
+        # Bags recorded before ROS 2 Iron store no definitions; use the bundled
+        # type library, as AnyReader does for binary-v1.
+        if self._typestore is None:
+            self._typestore = get_typestore(Stores.LATEST)
+        try:
+            return self._typestore.generate_msgdef(  # type: ignore[attr-defined]
+                connection.msgtype, ros_version=2  # type: ignore[attr-defined]
+            )[0]
+        except TypesysError:
+            return ""
 
 
 class StageMetrics:
@@ -397,17 +538,28 @@ def note_progress(messages: int, total: int, emitted: int, interval: int) -> Non
         print(f"PROGRESS\t{messages}\t{total}\t{emitted}", file=sys.stderr, flush=True)
 
 
-def stream_raw(reader: object, connections: list[object], metrics: StageMetrics) -> tuple[int, int]:
+def stream_raw(
+    reader: object,
+    connections: list[object],
+    metrics: StageMetrics,
+    ros2_schemas: Ros2Schemas | None,
+) -> tuple[int, int]:
     raw_writer = RawWriter(sys.stdout.buffer, metrics)
     for connection in connections:
         topic = connection.topic.rstrip("/") or "/"
-        schema = connection.msgdef.data if connection.msgdef else ""
-        raw_writer.emit_connection(
-            connection.id, topic, ros1_typename(connection.msgtype), schema
-        )
+        if ros2_schemas is None:
+            msgtype = ros1_typename(connection.msgtype)
+            schema = connection.msgdef.data if connection.msgdef else ""
+        else:
+            msgtype = connection.msgtype
+            schema = ros2_schemas.schema(connection)
+        raw_writer.emit_connection(connection.id, topic, msgtype, schema)
     messages = 0
     waiting_for_first = time.perf_counter()
-    message_stream = reader.messages(connections=connections) if connections else ()
+    if ros2_schemas is None:
+        message_stream = iter_ros1_messages(reader, connections)  # type: ignore[arg-type]
+    else:
+        message_stream = reader.messages(connections=connections) if connections else ()
     total = sum(connection.msgcount for connection in connections)
     for connection, timestamp, rawdata in message_stream:
         messages += 1
@@ -453,6 +605,7 @@ def stream_fields(
         messages += 1
         if messages == 1:
             metrics.first_message_seconds = time.perf_counter() - waiting_for_first
+        note_progress(messages, total, emitted, 500)
         sampled = metrics.sample(messages)
         try:
             stage_started = time.perf_counter() if sampled else 0.0
@@ -474,12 +627,21 @@ def stream_fields(
         except Exception as error:
             warn_once(connection.topic, "flatten", error)
             continue
-        note_progress(messages, total, emitted, 500)
     writer.done(messages, emitted)
     return messages, emitted
 
 
+def use_utf8_streams() -> None:
+    # Windows pipes default to the ANSI code page (for example GBK), while the
+    # Studio loader decodes the topic index and diagnostics as UTF-8.
+    for stream, errors in ((sys.stdout, "replace"), (sys.stderr, "backslashreplace")):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors=errors)
+
+
 def main() -> int:
+    use_utf8_streams()
     parser = argparse.ArgumentParser()
     parser.add_argument("bag")
     parser.add_argument("--max-array", type=array_limit, default=100)
@@ -496,12 +658,14 @@ def main() -> int:
     started_total = time.perf_counter()
 
     try:
-        if use_raw and not is_ros1_bag(bag):
-            raise ValueError("raw-v1 is only supported for ROS1 .bag files")
+        if use_raw and not (is_ros1_bag(bag) or is_ros2_bag(bag)):
+            raise ValueError("raw-v1 requires a ROS1 .bag file or a ROS2 bag directory")
         requested_topics = load_topics_file(args.topics_file) if args.topics_file else None
         started_open = time.perf_counter()
-        if use_raw or (args.inspect and is_ros1_bag(bag)):
-            reader_cm: object = Ros1Reader(bag)
+        if use_raw and is_ros2_bag(bag):
+            reader_cm: object = Ros2Reader(bag)
+        elif use_raw or (args.inspect and is_ros1_bag(bag)):
+            reader_cm = Ros1Reader(bag)
         else:
             typestore = get_typestore(Stores.LATEST)
             reader_cm = AnyReader([bag], default_typestore=typestore)
@@ -531,7 +695,8 @@ def main() -> int:
                 flush=True,
             )
             if use_raw:
-                messages, emitted = stream_raw(reader, selected_connections, metrics)
+                ros2_schemas = None if is_ros1_bag(bag) else Ros2Schemas()
+                messages, emitted = stream_raw(reader, selected_connections, metrics, ros2_schemas)
             else:
                 messages, emitted = stream_fields(
                     reader, selected_connections, args.protocol, args.max_array, metrics

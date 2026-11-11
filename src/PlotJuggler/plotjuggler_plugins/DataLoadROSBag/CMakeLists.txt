@@ -1,6 +1,7 @@
 set(ROSBAG_PYTHON_WORKER
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../runtime/rosbag_python/extract_rosbag.py")
 get_filename_component(ROSBAG_PYTHON_WORKER "${ROSBAG_PYTHON_WORKER}" ABSOLUTE)
+get_filename_component(ROSBAG_PYTHON_RUNTIME "${ROSBAG_PYTHON_WORKER}" DIRECTORY)
 set(ROSBAG_GENERATOR
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../rosbag/generate_numeric_ros1_sample.py")
 get_filename_component(ROSBAG_GENERATOR "${ROSBAG_GENERATOR}" ABSOLUTE)
@@ -42,17 +43,14 @@ target_compile_definitions(DataLoadROSBag PRIVATE
   QT_PLUGIN
   ROSBAG_PYTHON_WORKER_SOURCE="${ROSBAG_PYTHON_WORKER}")
 
-add_custom_command(TARGET DataLoadROSBag POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory
-          "$<TARGET_FILE_DIR:DataLoadROSBag>/runtime/rosbag_python"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${ROSBAG_PYTHON_WORKER}"
-          "$<TARGET_FILE_DIR:DataLoadROSBag>/runtime/rosbag_python/extract_rosbag.py"
-  COMMENT "Packaging ROS bag Python worker")
-
 install(TARGETS DataLoadROSBag DESTINATION ${PJ_PLUGIN_INSTALL_DIRECTORY})
-install(FILES "${ROSBAG_PYTHON_WORKER}"
-        DESTINATION "bin/runtime/rosbag_python")
+# The worker imports the vendored rosbags package and APSW shim from its own directory.
+# "bin" only holds console launchers that pip writes locally for the runtime snapshot.
+install(DIRECTORY "${ROSBAG_PYTHON_RUNTIME}/"
+        DESTINATION "bin/runtime/rosbag_python"
+        PATTERN "__pycache__" EXCLUDE
+        PATTERN "*.pyc" EXCLUDE
+        PATTERN "bin" EXCLUDE)
 
 if(BUILD_TESTING)
   find_package(GTest QUIET)
@@ -71,10 +69,13 @@ if(BUILD_TESTING)
     gtest_discover_tests(test_rosbag_binary_decoder)
 
     add_executable(test_rosbag_worker_e2e tests/test_rosbag_worker_e2e.cpp)
+    get_filename_component(ROSBAG_ROS2_FIXTURE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../../../rosbag/ros2/cdr_test/cdr_test_0.db3" ABSOLUTE)
     target_compile_definitions(test_rosbag_worker_e2e PRIVATE
       ROSBAG_PYTHON_WORKER_SOURCE="${ROSBAG_PYTHON_WORKER}"
       ROSBAG_GENERATOR_SOURCE="${ROSBAG_GENERATOR}"
-      ROSBAG_BENCHMARK_GENERATOR_SOURCE="${ROSBAG_BENCHMARK_GENERATOR}")
+      ROSBAG_BENCHMARK_GENERATOR_SOURCE="${ROSBAG_BENCHMARK_GENERATOR}"
+      ROSBAG_ROS2_FIXTURE="${ROSBAG_ROS2_FIXTURE}")
     target_link_libraries(test_rosbag_worker_e2e PRIVATE
       rosbag_record_parser
       parser_ros_core
@@ -97,6 +98,11 @@ if(BUILD_TESTING)
       file(TO_CMAKE_PATH "${ROSBAG_E2E_PYTHON}" ROSBAG_E2E_PYTHON)
       target_compile_definitions(test_rosbag_worker_e2e PRIVATE
         ROSBAG_E2E_PYTHON="${ROSBAG_E2E_PYTHON}")
+      add_test(NAME RosbagWorkerPython
+               COMMAND "${ROSBAG_E2E_PYTHON}" -B
+                       "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_extract_rosbag.py" -v)
+      set_tests_properties(RosbagWorkerPython PROPERTIES
+        ENVIRONMENT "RSPJ_WORKER_RUNTIME=${ROSBAG_PYTHON_RUNTIME}")
     endif()
     gtest_discover_tests(test_rosbag_worker_e2e)
 

@@ -77,6 +77,13 @@ jobs:
             -Configuration RelWithDebInfo `
             -Jobs 2
 
+      - name: Run updater end-to-end test
+        shell: pwsh
+        run: |
+          ./scripts/test-updater-e2e.ps1 `
+            -BuildDirectory $env:BUILD_DIR `
+            -ToolchainRoot '${{ steps.msys2.outputs.msys2-location }}'
+
       - name: Record ROS bag worker benchmarks
         shell: pwsh
         run: |
@@ -92,7 +99,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Failed to generate $format benchmark." }
             ./scripts/benchmark-rosbag-worker.ps1 `
               -BagPath $bag -PythonPath $python -WorkerPath $worker `
-              -Protocol binary-v1 -Iterations 1 `
+              -Protocol raw-v1 -Iterations 1 `
               -OutputPath "artifacts\benchmark\worker-$format.json"
           }
 
@@ -171,6 +178,33 @@ jobs:
           $version = (Get-Content src/PlotJuggler/STUDIO_VERSION -Raw).Trim()
           $beta = $version -match '(^|[.-])(beta|rc)([.-]|$)'
           "prerelease=$($beta.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      # Publishing deletes every other release and v* tag, so a re-run or re-pushed old
+      # tag must never replace a newer version.
+      - name: Refuse to replace a newer release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repository = "${{ github.repository }}"
+          $currentTag = "${{ github.ref_name }}"
+          $current = [semver]$currentTag.Substring(1)
+
+          $releaseTags = @(gh api "repos/$repository/releases?per_page=100" `
+            --paginate --jq '.[].tag_name')
+          if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate existing releases." }
+          $tagRefs = @(gh api "repos/$repository/git/matching-refs/tags/v" `
+            --paginate --jq '.[].ref')
+          if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate release tags." }
+
+          $existingTags = @($releaseTags) + @($tagRefs | ForEach-Object { $_ -replace '^refs/tags/', '' })
+          foreach ($tag in ($existingTags | Sort-Object -Unique)) {
+            $existing = $null
+            if ($tag -cmatch '^v(.+)$' -and [semver]::TryParse($Matches[1], [ref]$existing) -and
+                $existing -gt $current) {
+              throw "'$tag' is newer than '$currentTag'; refusing to publish an older release."
+            }
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

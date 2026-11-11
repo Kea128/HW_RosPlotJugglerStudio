@@ -44,13 +44,13 @@ try {
                 continue
             }
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Target)) | Out-Null
-            $Input = $Entry.Open()
+            $EntryStream = $Entry.Open()
             try {
                 $Output = [IO.File]::Open($Target, [IO.FileMode]::CreateNew,
                                          [IO.FileAccess]::Write, [IO.FileShare]::None)
-                try { $Input.CopyTo($Output) } finally { $Output.Dispose() }
+                try { $EntryStream.CopyTo($Output) } finally { $Output.Dispose() }
             }
-            finally { $Input.Dispose() }
+            finally { $EntryStream.Dispose() }
         }
     }
     finally { $Zip.Dispose() }

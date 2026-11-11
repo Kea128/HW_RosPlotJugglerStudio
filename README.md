@@ -16,15 +16,15 @@ ROS bag 和 Windows 便携发布能力：
 - 现有 `build/`、`install/`、`release/`、`.toolchain/` 和运行时目录是本地生成或
   分发产物，不是源码替代品。
 - `src/PlotJuggler/STUDIO_VERSION` 是 CMake 唯一版本源；当前版本为
-  `3.17.8`。
+  `3.17.9`。
 - 已恢复双标尺 A/B、直接拖动、可见曲线测量表、交点值标签与避让、时间域智能
   fit、加载后自动 fit、Studio 品牌及历史 MQTT/ZMQ 可靠性修复。
-- Standalone ROS bag 加载使用 Topic 预选、后台处理；ROS1 `.bag` 默认走
-  `raw-v1` 原始字节流并由 C++ `ParserROS` 解码，`binary-v1`/文本协议保留为回退。
-  标准 MCAP 默认使用原生 C++ loader。
+- Standalone ROS bag 加载使用 Topic 预选、后台处理；ROS1 `.bag` 和 ROS2
+  SQLite3 包默认走 `raw-v1` 原始字节流，由 C++ `ParserROS`（`ros1msg`/`ros2msg`）
+  解码，`binary-v1`/文本协议保留为回退。标准 MCAP 默认使用原生 C++ loader。
 - Windows UCRT64 构建产物为 `RosPlotJugglerStudio.exe`，插件安装到
   `bin/plugins`。
-- Windows UCRT64 构建和 127 项 CTest
+- Windows UCRT64 构建和 135 项 CTest（含 Python worker 回归）以及 updater E2E
   已在当前机器实际完成；三种确定性 ROS bag fixture 已通过 worker 与解析回归。
 - `main`/PR 会在 GitHub Actions 使用 MSYS2 UCRT64 构建测试；严格匹配
   `STUDIO_VERSION` 的 `v*` tag 会生成、复验并公开最新版 Release；发布成功后
@@ -57,7 +57,10 @@ ROS bag 和 Windows 便携发布能力：
 .\scripts\sync-latest-release.ps1
 ```
 
-构建脚本默认执行干净 configure/build、CTest 和 install。便携包生成到
+构建脚本默认执行干净 configure/build、CTest 和 install。CMake 通过 CPM 下载
+`data_tamer`、`fmt`、`lua`、`lz4`、`nlohmann_json`、`wasmer`、`zstd`；若代理需要
+认证导致下载失败，可把解压后的源码放到 `build\PlotJuggler\_deps\<名称>-src`
+（或用 `-DependencyCacheDirectory` 指定目录），脚本会直接复用。便携包生成到
 `release/`，包含 ZIP、`SHA256SUMS`、`zip.sha256` 和包内 `manifest.json`。
 发布完成后，同步脚本会校验并解压线上最新版；可直接双击
 `release\Run-RosPlotJugglerStudio.cmd` 运行，无需安装。

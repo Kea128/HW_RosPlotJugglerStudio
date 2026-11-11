@@ -5,10 +5,14 @@ param(
     [string]$ReleaseDirectory,
     [string]$VersionFile,
     [string]$RepositoryUrl = "https://github.com/Kea128/HW_RosPlotJugglerStudio",
+    [switch]$PruneStaleArchives,
     [switch]$Run
 )
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell redraws its progress bar for every downloaded block, which makes a
+# 300+ MiB release download many times slower.
+$ProgressPreference = "SilentlyContinue"
 Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -28,15 +32,12 @@ if ($RepositoryPath.Split("/").Count -ne 2) {
 }
 
 $Headers = @{
-    Accept = "application/vnd.github+json"
     "User-Agent" = "RosPlotJugglerStudio-release-sync"
 }
-$ReleaseApiUrl = "https://api.github.com/repos/$RepositoryPath/releases/tags/$Tag"
+# Public asset URLs avoid the GitHub API, whose anonymous rate limit is shared by everyone
+# behind the same proxy; draft releases have no public assets, so they still fail here.
+$DownloadBaseUrl = "https://github.com/$RepositoryPath/releases/download/$Tag"
 Write-Host "Resolving $Tag from $RepositoryUrl"
-$Release = Invoke-RestMethod -Uri $ReleaseApiUrl -Headers $Headers
-if ([string]$Release.tag_name -cne $Tag -or [bool]$Release.draft) {
-    throw "GitHub Release '$Tag' is missing or is still a draft."
-}
 
 $ArchiveName = "RosPlotJugglerStudio-$Version-windows-x86_64.zip"
 $RequiredAssetNames = @(
@@ -45,22 +46,18 @@ $RequiredAssetNames = @(
     "SHA256SUMS",
     $ManifestName
 )
-$Assets = @{}
-foreach ($Asset in @($Release.assets)) {
-    $Assets[[string]$Asset.name] = $Asset
-}
-foreach ($AssetName in $RequiredAssetNames) {
-    if (-not $Assets.ContainsKey($AssetName)) {
-        throw "GitHub Release '$Tag' does not contain required asset '$AssetName'."
-    }
-}
 
 New-Item -ItemType Directory -Path $ReleaseDirectory -Force | Out-Null
 foreach ($AssetName in $RequiredAssetNames) {
     $Destination = Join-Path $ReleaseDirectory $AssetName
     Write-Host "Downloading $AssetName"
-    Invoke-WebRequest -Uri ([string]$Assets[$AssetName].browser_download_url) `
-        -Headers $Headers -UseBasicParsing -OutFile $Destination
+    try {
+        Invoke-WebRequest -Uri "$DownloadBaseUrl/$AssetName" `
+            -Headers $Headers -UseBasicParsing -OutFile $Destination
+    }
+    catch {
+        throw "Public GitHub Release '$Tag' does not provide '$AssetName': $($_.Exception.Message)"
+    }
 }
 
 $ArchivePath = Join-Path $ReleaseDirectory $ArchiveName
@@ -69,10 +66,28 @@ $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 if ([string]$Manifest.version -cne $Version) {
     throw "Downloaded manifest version '$($Manifest.version)' does not match '$Version'."
 }
+if ([long]$Manifest.size -ne (Get-Item -LiteralPath $ArchivePath).Length) {
+    throw "Archive size does not match the manifest size $($Manifest.size)."
+}
 $ExpectedHash = ([string]$Manifest.sha256).ToLowerInvariant()
 $ActualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($ActualHash -cne $ExpectedHash) {
     throw "Archive SHA-256 mismatch. Expected $ExpectedHash, got $ActualHash."
+}
+
+function Invoke-WithRetry([scriptblock]$Action) {
+    # Security scanners briefly lock freshly extracted executables, so moving their
+    # directory can fail with "access denied" for a few seconds.
+    for ($Attempt = 1; ; $Attempt++) {
+        try {
+            & $Action
+            return
+        }
+        catch {
+            if ($Attempt -ge 20) { throw }
+            Start-Sleep -Seconds 3
+        }
+    }
 }
 
 $PortableDirectory = Join-Path $ReleaseDirectory "portable"
@@ -83,7 +98,8 @@ $BackupRoot = "$PackageRoot.previous"
 
 try {
     Write-Host "Extracting verified portable package"
-    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $StagingDirectory -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $StagingDirectory)
     $StagedExecutable = Join-Path $StagedPackageRoot "bin\RosPlotJugglerStudio.exe"
     if (-not (Test-Path -LiteralPath $StagedExecutable -PathType Leaf)) {
         throw "Portable archive does not contain RosPlotJugglerStudio/bin/RosPlotJugglerStudio.exe."
@@ -94,19 +110,19 @@ try {
         Remove-Item -LiteralPath $BackupRoot -Recurse -Force
     }
     if (Test-Path -LiteralPath $PackageRoot) {
-        Move-Item -LiteralPath $PackageRoot -Destination $BackupRoot
+        Invoke-WithRetry { Move-Item -LiteralPath $PackageRoot -Destination $BackupRoot }
     }
     try {
-        Move-Item -LiteralPath $StagedPackageRoot -Destination $PackageRoot
+        Invoke-WithRetry { Move-Item -LiteralPath $StagedPackageRoot -Destination $PackageRoot }
     }
     catch {
         if ((Test-Path -LiteralPath $BackupRoot) -and -not (Test-Path -LiteralPath $PackageRoot)) {
-            Move-Item -LiteralPath $BackupRoot -Destination $PackageRoot
+            Invoke-WithRetry { Move-Item -LiteralPath $BackupRoot -Destination $PackageRoot }
         }
         throw
     }
     if (Test-Path -LiteralPath $BackupRoot) {
-        Remove-Item -LiteralPath $BackupRoot -Recurse -Force
+        Invoke-WithRetry { Remove-Item -LiteralPath $BackupRoot -Recurse -Force }
     }
 }
 finally {
@@ -121,6 +137,23 @@ $Launcher = "@echo off`r`nstart `"`" `"%~dp0portable\RosPlotJugglerStudio\bin\Ro
 Set-Content -LiteralPath $LauncherPath -Value $Launcher -Encoding ASCII -NoNewline
 Set-Content -LiteralPath (Join-Path $ReleaseDirectory "CURRENT_VERSION") `
     -Value $Version -Encoding ASCII -NoNewline
+
+$StaleArtifacts = @(Get-ChildItem -LiteralPath $ReleaseDirectory -File | Where-Object {
+        ($_.Name -like "RosPlotJugglerStudio-*-windows-x86_64.zip*" -and
+         $_.Name -cne $ArchiveName -and $_.Name -cne "$ArchiveName.sha256") -or
+        ($_.Name -like "update-manifest-*.json" -and $_.Name -cne $ManifestName)
+    })
+if ($StaleArtifacts.Count -gt 0) {
+    $StaleBytes = ($StaleArtifacts | Measure-Object -Property Length -Sum).Sum
+    if ($PruneStaleArchives) {
+        $StaleArtifacts | Remove-Item -Force
+        Write-Host ("Removed {0} stale release file(s), {1:N0} MiB." -f $StaleArtifacts.Count, ($StaleBytes / 1MB))
+    }
+    else {
+        Write-Host ("{0} stale release file(s) from other versions use {1:N0} MiB; rerun with -PruneStaleArchives to remove them." -f
+            $StaleArtifacts.Count, ($StaleBytes / 1MB))
+    }
+}
 
 Write-Host "Local portable release is ready:"
 Write-Host "  $Executable"

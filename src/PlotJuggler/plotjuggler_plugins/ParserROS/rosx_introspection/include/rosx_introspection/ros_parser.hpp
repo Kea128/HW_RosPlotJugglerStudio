@@ -194,6 +194,7 @@ class Parser {
   BlobPolicy _blob_policy;
   mutable size_t _estimated_field_count = 0;
   std::shared_ptr<ROSField> _dummy_root_field;
+  SchemaFormat _schema_format;
 
   std::unique_ptr<Deserializer> _deserializer;
 };

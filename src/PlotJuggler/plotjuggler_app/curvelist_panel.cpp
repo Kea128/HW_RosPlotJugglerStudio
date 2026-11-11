@@ -281,6 +281,12 @@ void CurveListPanel::changeFontSize(int point_size)
   settings.setValue("FilterableListWidget/table_point_size", point_size);
 }
 
+void CurveListPanel::reloadSettings()
+{
+  _tree_view->reloadSettings();
+  _custom_view->reloadSettings();
+}
+
 bool CurveListPanel::is2ndColumnHidden() const
 {
   // return ui->checkBoxHideSecondColumn->isChecked();
@@ -297,9 +303,8 @@ void CurveListPanel::refreshValues()
 {
   auto default_foreground = _custom_view->palette().foreground();
 
-  auto FormattedNumber = [](double value) {
-    QSettings settings;
-    int prec = settings.value("Preferences::precision", 3).toInt();
+  const int prec = QSettings().value("Preferences::precision", 3).toInt();
+  auto FormattedNumber = [prec](double value) {
     QString num_text = QString::number(value, 'f', prec);
     if (num_text.contains('.'))
     {

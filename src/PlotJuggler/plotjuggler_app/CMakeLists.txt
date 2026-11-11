@@ -73,6 +73,7 @@ set(PLOTJUGGLER_SRC
     studio/update/update_checker.cpp
     studio/update/update_downloader.cpp
     studio/update/update_coordinator.cpp
+    studio/update/system_proxy.h
     point_series_xy.cpp
     # plotzoomer.cpp
     plot_background.cpp

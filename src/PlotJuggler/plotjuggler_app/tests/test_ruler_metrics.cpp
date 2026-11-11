@@ -119,6 +119,16 @@ TEST(CurveTrackerSampling, RejectsPointsOutsideCurveTimeDomain)
   EXPECT_DOUBLE_EQ(curvePointAt(&curve, 1.0)->y(), 10.0);
 }
 
+TEST(CurveTrackerSampling, SnapsToLastSampleAtEndOfCurve)
+{
+  QwtPlotCurve curve;
+  curve.setSamples(QVector<QPointF>{ { 1.0, 10.0 }, { 2.0, 20.0 }, { 3.0, 30.0 } });
+  ASSERT_TRUE(curvePointAt(&curve, 3.0).has_value());
+  EXPECT_DOUBLE_EQ(curvePointAt(&curve, 3.0)->y(), 30.0);
+  ASSERT_TRUE(curvePointAt(&curve, 2.9).has_value());
+  EXPECT_DOUBLE_EQ(curvePointAt(&curve, 2.9)->y(), 30.0);
+}
+
 TEST(CurveTrackerSampling, UsesNearestSampleAndSupportsSinglePoint)
 {
   QwtPlotCurve curve;

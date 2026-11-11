@@ -52,6 +52,8 @@ public:
 
   void changeFontSize(int point_size);
 
+  void reloadSettings();
+
   bool is2ndColumnHidden() const;
 
   void update2ndColumnValues(double time);

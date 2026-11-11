@@ -1,4 +1,5 @@
 #include "update_checker.h"
+#include "system_proxy.h"
 
 #include <QCoreApplication>
 #include <QNetworkReply>
@@ -16,6 +17,7 @@ constexpr int kMaximumManifestBytes = 1024 * 1024;
 
 UpdateChecker::UpdateChecker(QObject* parent) : QObject(parent)
 {
+  useSystemProxy(_manager);
   _timeout.setSingleShot(true);
   connect(&_timeout, &QTimer::timeout, this, [this]() {
     if (_reply)

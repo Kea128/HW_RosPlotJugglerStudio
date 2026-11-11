@@ -17,22 +17,26 @@ Set-StrictMode -Version Latest
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $ReleaseDirectory) { $ReleaseDirectory = Join-Path $ProjectRoot "release" }
 if (-not $VersionFile) { $VersionFile = Join-Path $ProjectRoot "src\PlotJuggler\STUDIO_VERSION" }
+if (-not (Test-Path -LiteralPath $VersionFile -PathType Leaf)) {
+    throw "Release verification prerequisite is missing: $VersionFile"
+}
+$Version = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
 if (-not $ManifestPath) {
+    # A local release directory can also hold the other channel's manifest from an
+    # earlier version; only the manifest for STUDIO_VERSION is under test.
     $CandidateManifests = @(Get-ChildItem -LiteralPath $ReleaseDirectory `
-        -Filter "update-manifest-*.json" -File)
+        -Filter "update-manifest-*.json" -File | Where-Object {
+            [string](Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).version -ceq $Version
+        })
     if ($CandidateManifests.Count -ne 1) {
-        throw "Expected exactly one update manifest in $ReleaseDirectory; found $($CandidateManifests.Count)."
+        throw "Expected exactly one update manifest for $Version in $ReleaseDirectory; found $($CandidateManifests.Count)."
     }
     $ManifestPath = $CandidateManifests[0].FullName
 }
 
-foreach ($RequiredPath in @($VersionFile, $ManifestPath)) {
-    if (-not (Test-Path -LiteralPath $RequiredPath -PathType Leaf)) {
-        throw "Release verification prerequisite is missing: $RequiredPath"
-    }
+if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+    throw "Release verification prerequisite is missing: $ManifestPath"
 }
-
-$Version = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
 if (-not $Tag) { $Tag = $env:GITHUB_REF_NAME }
 if (-not $Tag) { $Tag = "v$Version" }
 $ExpectedTag = "v$Version"

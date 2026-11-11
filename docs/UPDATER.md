@@ -26,6 +26,7 @@ helper 会执行以下检查：
    backup 并重启旧版。
 
 日志保存在 `%LOCALAPPDATA%\RosPlotJugglerStudio\Updater\updater.log`。更新过程
-不读取或覆盖 QSettings 和用户项目。helper 不会强杀无响应进程；若健康探针超时
-但仍未自行退出，为避免破坏仍在运行的文件，helper 会保留 backup 并记录日志，
-需要用户正常关闭该进程后再处理。
+不读取或覆盖 QSettings 和用户项目。helper 启动后立即持有父进程句柄，父进程在
+预检期间已退出也能继续；它不会强制结束用户的主程序，最多等待其正常退出 5 分钟。
+健康探针是 helper 自己启动、不含用户数据的新版实例：若超时未确认，或确认后未在
+15 秒内退出，helper 会先结束探针，再恢复 backup 并重启旧版。

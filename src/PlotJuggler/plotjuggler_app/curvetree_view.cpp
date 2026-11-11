@@ -87,31 +87,51 @@ CurveTreeView::CurveTreeView(CurveListPanel* parent) : QTreeWidget(parent), Curv
     }
   });
   _tooltip_timer->start(100);
+  reloadSettings();
+}
+
+void CurveTreeView::reloadSettings()
+{
+  // Read once instead of per added curve: constructing QSettings re-checks the INI file
+  // on disk, which dominated loading bags with tens of thousands of series.
+  _use_separator = QSettings().value("Preferences::use_separator", true).toBool();
 }
 
 void CurveTreeView::clear()
 {
   _tooltip_item = nullptr;
   _tooltip_timer->stop();
+  _children_by_text.clear();
   QTreeWidget::clear();
   _leaf_count = 0;
   _hidden_count = 0;
 }
 
+QTreeWidgetItem* CurveTreeView::findChild(QTreeWidgetItem* parent, const QString& text)
+{
+  auto it = _children_by_text.find(parent);
+  if (it == _children_by_text.end())
+  {
+    QHash<QString, QTreeWidgetItem*> children;
+    for (int c = 0; c < parent->childCount(); c++)
+    {
+      QTreeWidgetItem* child = parent->child(c);
+      const QString child_text = child->text(0);
+      if (!children.contains(child_text))
+      {
+        children.insert(child_text, child);
+      }
+    }
+    it = _children_by_text.insert(parent, children);
+  }
+  return it->value(text, nullptr);
+}
+
 void CurveTreeView::addItem(const QString& group_name, const QString& tree_name,
                             const QString& plot_ID)
 {
-  QSettings settings; /*
-                       * This Source Code Form is subject to the terms of the Mozilla
-                       * Public License, v. 2.0. If a copy of the MPL was not distributed
-                       * with this file, You can obtain one at
-                       * https://mozilla.org/MPL/2.0/.
-                       */
-
-  bool use_separator = settings.value("Preferences::use_separator", true).toBool();
-
   QStringList parts;
-  if (use_separator)
+  if (_use_separator)
   {
     parts = tree_name.split('/', PJ::SkipEmptyParts);
   }
@@ -150,23 +170,17 @@ void CurveTreeView::addItem(const QString& group_name, const QString& tree_name,
   }
 
   QTreeWidgetItem* tree_parent = this->invisibleRootItem();
+  QFont name_font = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
+  name_font.setPointSize(_point_size);
+  QFont value_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+  value_font.setPointSize(_point_size - 2);
 
   for (int i = 0; i < parts.size(); i++)
   {
     bool is_leaf = (i == parts.size() - 1);
     const auto& part = parts[i];
 
-    QTreeWidgetItem* matching_child = nullptr;
-
-    for (int c = 0; c < tree_parent->childCount(); c++)
-    {
-      QTreeWidgetItem* tree_child = tree_parent->child(c);
-      if (tree_child->text(0) == part)
-      {
-        matching_child = tree_child;
-        break;
-      }
-    }
+    QTreeWidgetItem* matching_child = findChild(tree_parent, part);
 
     if (matching_child)
     {
@@ -183,17 +197,13 @@ void CurveTreeView::addItem(const QString& group_name, const QString& tree_name,
       QTreeWidgetItem* child_item = new TreeWidgetItem(tree_parent);
       child_item->setText(0, part);
       child_item->setText(1, is_leaf ? "-" : "");
+      _children_by_text[tree_parent].insert(part, child_item);
 
       bool isGroupCell = (i < group_parts.size());
 
-      QFont font = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
-      font.setPointSize(_point_size);
       // font.setBold(isGroupCell);
-      child_item->setFont(0, font);
-
-      font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-      font.setPointSize(_point_size - 2);
-      child_item->setFont(1, font);
+      child_item->setFont(0, name_font);
+      child_item->setFont(1, value_font);
       child_item->setTextAlignment(1, Qt::AlignRight);
 
       tree_parent = child_item;
@@ -397,6 +407,7 @@ void CurveTreeView::removeCurve(const QString& to_be_deleted)
 
   // just in case
   _tooltip_item = nullptr;
+  _children_by_text.clear();
   treeVisitor(removeFunc);
 }
 

@@ -1,4 +1,5 @@
 #include "update_downloader.h"
+#include "system_proxy.h"
 
 #include <QCoreApplication>
 #include <QNetworkReply>
@@ -16,6 +17,7 @@ UpdateDownloader::UpdateDownloader(QObject* parent)
   : UpdateDownloader(new QNetworkAccessManager, parent)
 {
   _manager->setParent(this);
+  useSystemProxy(*_manager);
 }
 
 UpdateDownloader::UpdateDownloader(QNetworkAccessManager* manager, QObject* parent)

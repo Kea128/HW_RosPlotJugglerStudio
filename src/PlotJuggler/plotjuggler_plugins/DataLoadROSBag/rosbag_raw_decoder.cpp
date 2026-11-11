@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <limits>
 
 namespace PJ
@@ -57,10 +58,20 @@ bool readSizedString(const uint8_t* payload, size_t size, size_t& pos, std::stri
   pos += length;
   return true;
 }
+
+template <typename SeriesMap>
+void eraseGroupSeries(SeriesMap& series, const PlotGroup::Ptr& group)
+{
+  for (auto it = series.begin(); it != series.end();)
+  {
+    it = it->second.group() == group ? series.erase(it) : std::next(it);
+  }
+}
 }  // namespace
 
-RosbagRawDecoder::RosbagRawDecoder(PlotDataMapRef&, ParserFactory factory, int max_array)
-  : _factory(std::move(factory)), _max_array(max_array)
+RosbagRawDecoder::RosbagRawDecoder(PlotDataMapRef& destination, ParserFactory factory,
+                                   int max_array)
+  : _data(destination), _factory(std::move(factory)), _max_array(max_array)
 {
 }
 
@@ -116,6 +127,11 @@ bool RosbagRawDecoder::done() const
 QStringList RosbagRawDecoder::failedTopics() const
 {
   return _failed_topics;
+}
+
+QStringList RosbagRawDecoder::failureReasons() const
+{
+  return _failure_reasons;
 }
 
 QStringList RosbagRawDecoder::warnings() const
@@ -218,9 +234,15 @@ bool RosbagRawDecoder::parseConnection(const uint8_t* payload, size_t size)
     return fail();
   }
 
-  Connection connection;
+  Connection& connection = _connections[id];
   connection.topic = topic;
   connection.type = type;
+  if (_failed_topics.contains(QString::fromStdString(topic)))
+  {
+    connection.failed = true;
+    return true;
+  }
+  QString reason = QStringLiteral("no parser for %1").arg(QString::fromStdString(type));
   try
   {
     connection.parser = _factory(topic, type, schema);
@@ -232,21 +254,54 @@ bool RosbagRawDecoder::parseConnection(const uint8_t* payload, size_t size)
   catch (const std::exception& error)
   {
     connection.parser.reset();
-    _warnings.push_back(
-        QStringLiteral("WARN\t%1\tschema: %2")
-            .arg(QString::fromStdString(topic), QString::fromUtf8(error.what())));
+    reason = QStringLiteral("schema: %1").arg(QString::fromUtf8(error.what()));
   }
   if (!connection.parser)
   {
     connection.failed = true;
-    const QString topic_name = QString::fromStdString(topic);
-    if (!_failed_topics.contains(topic_name))
+    if (_topics_with_data.count(topic) != 0)
     {
-      _failed_topics.push_back(topic_name);
+      warnOnce(topic, reason);
+    }
+    else
+    {
+      handOver(topic, reason);
     }
   }
-  _connections.emplace(id, std::move(connection));
   return true;
+}
+
+void RosbagRawDecoder::warnOnce(const std::string& topic, const QString& reason)
+{
+  if (_warned_topics.insert(topic).second)
+  {
+    _warnings.push_back(
+        QStringLiteral("WARN\t%1\t%2").arg(QString::fromStdString(topic), reason));
+  }
+}
+
+void RosbagRawDecoder::handOver(const std::string& topic, const QString& reason)
+{
+  for (auto& [id, connection] : _connections)
+  {
+    if (connection.topic == topic)
+    {
+      connection.failed = true;
+      connection.parser.reset();
+    }
+  }
+  // A message that failed half-way may already have stored some of its fields.
+  const auto group = _data.groups.find(topic);
+  if (group != _data.groups.end())
+  {
+    eraseGroupSeries(_data.numeric, group->second);
+    eraseGroupSeries(_data.strings, group->second);
+    eraseGroupSeries(_data.user_defined, group->second);
+    eraseGroupSeries(_data.scatter_xy, group->second);
+  }
+  const QString topic_name = QString::fromStdString(topic);
+  _failed_topics.push_back(topic_name);
+  _failure_reasons.push_back(QStringLiteral("%1\t%2").arg(topic_name, reason));
 }
 
 bool RosbagRawDecoder::parseMessages(const uint8_t* payload, size_t size)
@@ -285,15 +340,22 @@ bool RosbagRawDecoder::parseMessages(const uint8_t* payload, size_t size)
         double timestamp = static_cast<double>(timestamp_ns) * 1.0e-9;
         MessageRef message(payload + pos, payload_size);
         connection.parser->parseMessage(message, timestamp);
+        if (!connection.decoded)
+        {
+          connection.decoded = true;
+          _topics_with_data.insert(connection.topic);
+        }
       }
       catch (const std::exception& error)
       {
-        if (_warned_topics.insert(connection.topic).second)
+        const QString reason = QStringLiteral("parse: %1").arg(QString::fromUtf8(error.what()));
+        if (_topics_with_data.count(connection.topic) != 0)
         {
-          _warnings.push_back(
-              QStringLiteral("WARN\t%1\tparse: %2")
-                  .arg(QString::fromStdString(connection.topic),
-                       QString::fromUtf8(error.what())));
+          warnOnce(connection.topic, reason);
+        }
+        else
+        {
+          handOver(connection.topic, reason);
         }
       }
     }

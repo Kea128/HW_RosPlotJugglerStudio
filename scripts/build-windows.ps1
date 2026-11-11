@@ -37,9 +37,19 @@ foreach ($RequiredPath in @($SourceDirectory, $CMake, $CTest, (Join-Path $UcrtBi
     }
 }
 
+function Invoke-Native {
+    param([Parameter(Mandatory)][string]$FilePath, [Parameter(ValueFromRemainingArguments)][string[]]$Arguments)
+    # Windows PowerShell turns redirected native stderr (for example CMake warnings)
+    # into terminating errors under "Stop"; rely on the exit code instead.
+    $PreviousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $FilePath @Arguments }
+    finally { $ErrorActionPreference = $PreviousPreference }
+}
+
 function Invoke-Checked {
     param([Parameter(Mandatory)][string]$FilePath, [Parameter(ValueFromRemainingArguments)][string[]]$Arguments)
-    & $FilePath @Arguments
+    Invoke-Native $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
     }
@@ -53,16 +63,16 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     throw "UCRT64 Python not found: $Python"
 }
 function Test-UcrtNumpy {
-    & $Python -c "import numpy"
+    Invoke-Native $Python -c "import numpy" | Out-Null
     return $LASTEXITCODE -eq 0
 }
 if (-not (Test-UcrtNumpy)) {
     $Bash = Join-Path $ToolchainRoot "usr\bin\bash.exe"
     if (Test-Path -LiteralPath $Bash -PathType Leaf) {
         $env:CHERE_INVOKING = "1"
-        & $Bash -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-python-numpy"
+        Invoke-Native $Bash -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc-fortran mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-python-numpy"
         if (-not (Test-UcrtNumpy)) {
-            & $Bash -lc "pacman -S --noconfirm --nodeps mingw-w64-ucrt-x86_64-gcc-libgfortran mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-python-numpy"
+            Invoke-Native $Bash -lc "pacman -S --noconfirm --nodeps mingw-w64-ucrt-x86_64-gcc-libgfortran mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-python-numpy"
         }
     }
 }
@@ -91,7 +101,7 @@ $ConfigureArguments = @(
     "-DPJ_BUILD_MOSAICO_PLUGIN=$(if ($EnableMosaico) { 'ON' } else { 'OFF' })",
     "-DRSPJ_PYTHON=$($Python.Replace('\', '/'))"
 )
-foreach ($Dependency in @("data_tamer", "lz4", "wasmer")) {
+foreach ($Dependency in @("data_tamer", "fmt", "lua", "lz4", "nlohmann_json", "wasmer", "zstd")) {
     $CachedSource = Join-Path $DependencyCacheDirectory "$Dependency-src"
     if (Test-Path -LiteralPath $CachedSource) {
         $CMakeCachedSource = ([IO.Path]::GetFullPath($CachedSource)).Replace("\", "/")

@@ -10,6 +10,16 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Invoke-Native {
+    param([Parameter(Mandatory)][string]$FilePath, [Parameter(ValueFromRemainingArguments)][string[]]$Arguments)
+    # Windows PowerShell turns redirected native stderr (the worker's METRIC lines) into
+    # terminating errors under "Stop"; callers check $LASTEXITCODE instead.
+    $PreviousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $FilePath @Arguments }
+    finally { $ErrorActionPreference = $PreviousPreference }
+}
+
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $PackageRoot) {
     $PackageRoot = Join-Path $ProjectRoot "release\portable\RosPlotJugglerStudio"
@@ -39,11 +49,18 @@ foreach ($PluginName in @("*DataLoadMCAP.dll", "*DataLoadROSBag.dll")) {
         throw "Required loader plugin was not installed: $PluginName"
     }
 }
+# Qt5Network loads OpenSSL at runtime, so dependency scanning cannot guarantee it is
+# packaged; the HTTPS update checker fails without it.
+foreach ($OpenSslPattern in @("libssl-*.dll", "libcrypto-*.dll")) {
+    if (-not (Get-ChildItem -LiteralPath $BinDirectory -Filter $OpenSslPattern -File)) {
+        throw "OpenSSL runtime required by the update checker is missing: $OpenSslPattern"
+    }
+}
 
 $env:PATH = "$BinDirectory;$env:PATH"
 $env:RSPJ_PYTHON = $Python
 $env:PYTHONPATH = Join-Path $BinDirectory "runtime\rosbag_python"
-& $Python -c "from rosbags.highlevel import AnyReader; import lz4, numpy, zstandard"
+Invoke-Native $Python -c "from rosbags.highlevel import AnyReader; import lz4, numpy, zstandard"
 if ($LASTEXITCODE -ne 0) { throw "Bundled ROS bag Python runtime import test failed." }
 
 $Generator = Join-Path $ProjectRoot "rosbag\generate_benchmark_bags.py"
@@ -56,12 +73,12 @@ try {
     foreach ($Format in @("ros1", "ros2-sqlite", "ros2-mcap")) {
         $SmokeBag = Join-Path $WorkerSmokeRoot "sample-$Format"
         if ($Format -eq "ros1") { $SmokeBag += ".bag" }
-        & $Python $Generator --format $Format --output $SmokeBag --messages 10 `
+        Invoke-Native $Python $Generator --format $Format --output $SmokeBag --messages 10 `
             --topics 2 --array-width 4 --empty-string-ratio 0.2 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "Bundled Python could not generate the $Format smoke fixture."
         }
-        $InspectJson = (& $Python -u $Worker $SmokeBag --inspect) -join ""
+        $InspectJson = (Invoke-Native $Python -u $Worker $SmokeBag --inspect) -join ""
         if ($LASTEXITCODE -ne 0) { throw "Packaged worker inspect failed for $Format." }
         $Index = $InspectJson | ConvertFrom-Json
         if ([int]$Index.version -ne 1 -or [int]$Index.totalMessages -ne 30 -or
@@ -69,39 +86,43 @@ try {
             throw "Packaged worker returned an invalid $Format topic index."
         }
 
-        $BinaryOutput = Join-Path $WorkerSmokeRoot "sample-$Format.bin"
-        $StartInfo = [Diagnostics.ProcessStartInfo]::new()
-        $StartInfo.FileName = $Python
-        $StartInfo.UseShellExecute = $false
-        $StartInfo.RedirectStandardOutput = $true
-        $StartInfo.RedirectStandardError = $true
-        $StartInfo.Arguments = (@("-u", $Worker, $SmokeBag, "--protocol", "binary-v1") |
-                ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join " "
-        $WorkerProcess = [Diagnostics.Process]::new()
-        $WorkerProcess.StartInfo = $StartInfo
-        [void]$WorkerProcess.Start()
-        $OutputStream = [IO.File]::Create($BinaryOutput)
-        try {
-            $CopyTask = $WorkerProcess.StandardOutput.BaseStream.CopyToAsync($OutputStream)
-            $ErrorTask = $WorkerProcess.StandardError.ReadToEndAsync()
-            if (-not $WorkerProcess.WaitForExit($TimeoutSeconds * 1000)) {
-                $WorkerProcess.Kill()
-                throw "Packaged worker binary protocol timed out for $Format."
+        # The loader streams raw messages for every format and uses binary-v1 as fallback.
+        foreach ($Stream in @(@("binary-v1", "52-53-50-4A-42-41-47-00"),
+                              @("raw-v1", "52-53-50-4A-52-41-57-00"))) {
+            $Protocol = $Stream[0]
+            $StreamOutput = Join-Path $WorkerSmokeRoot "sample-$Format-$Protocol.bin"
+            $StartInfo = [Diagnostics.ProcessStartInfo]::new()
+            $StartInfo.FileName = $Python
+            $StartInfo.UseShellExecute = $false
+            $StartInfo.RedirectStandardOutput = $true
+            $StartInfo.RedirectStandardError = $true
+            $StartInfo.Arguments = (@("-u", $Worker, $SmokeBag, "--protocol", $Protocol) |
+                    ForEach-Object { '"' + $_.Replace('"', '\"') + '"' }) -join " "
+            $WorkerProcess = [Diagnostics.Process]::new()
+            $WorkerProcess.StartInfo = $StartInfo
+            [void]$WorkerProcess.Start()
+            $OutputStream = [IO.File]::Create($StreamOutput)
+            try {
+                $CopyTask = $WorkerProcess.StandardOutput.BaseStream.CopyToAsync($OutputStream)
+                $ErrorTask = $WorkerProcess.StandardError.ReadToEndAsync()
+                if (-not $WorkerProcess.WaitForExit($TimeoutSeconds * 1000)) {
+                    $WorkerProcess.Kill()
+                    throw "Packaged worker $Protocol protocol timed out for $Format."
+                }
+                [void]$CopyTask.GetAwaiter().GetResult()
+                $Diagnostics = $ErrorTask.GetAwaiter().GetResult()
+                if ($WorkerProcess.ExitCode -ne 0) {
+                    throw "Packaged worker $Protocol protocol failed for ${Format}: $Diagnostics"
+                }
             }
-            [void]$CopyTask.GetAwaiter().GetResult()
-            $Diagnostics = $ErrorTask.GetAwaiter().GetResult()
-            if ($WorkerProcess.ExitCode -ne 0) {
-                throw "Packaged worker binary protocol failed for ${Format}: $Diagnostics"
+            finally {
+                $OutputStream.Dispose()
+                $WorkerProcess.Dispose()
             }
-        }
-        finally {
-            $OutputStream.Dispose()
-            $WorkerProcess.Dispose()
-        }
-        $Magic = [IO.File]::ReadAllBytes($BinaryOutput)
-        if ($Magic.Length -lt 12 -or
-            [BitConverter]::ToString($Magic, 0, 8) -ne "52-53-50-4A-42-41-47-00") {
-            throw "Packaged worker returned an invalid binary header for $Format."
+            $Magic = [IO.File]::ReadAllBytes($StreamOutput)
+            if ($Magic.Length -lt 12 -or [BitConverter]::ToString($Magic, 0, 8) -ne $Stream[1]) {
+                throw "Packaged worker returned an invalid $Protocol header for $Format."
+            }
         }
     }
 }

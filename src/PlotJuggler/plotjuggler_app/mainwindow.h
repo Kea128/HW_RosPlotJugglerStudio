@@ -261,7 +261,7 @@ private:
   void updateMeasurementSelection();
   void scheduleRulerMetricsUpdate();
   void updateRulerMetrics();
-  QString formatRulerTime(double absolute_time) const;
+  QString formatRulerTime(double absolute_time, int precision) const;
 
   void updateTimeSlider();
   void updateTimeOffset();

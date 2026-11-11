@@ -23,6 +23,7 @@
 
 #include "rosx_introspection/ros_parser.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <type_traits>
@@ -91,7 +92,8 @@ Parser::Parser(
       _discard_large_array(DISCARD_LARGE_ARRAYS),
       _max_array_size(100),
       _blob_policy(STORE_BLOB_AS_COPY),
-      _dummy_root_field(new ROSField(msg_type, topic_name)) {
+      _dummy_root_field(new ROSField(msg_type, topic_name)),
+      _schema_format(format) {
   if (format == DDS_IDL) {
     _schema = ParseIDL(topic_name, msg_type, definition);
   } else {
@@ -140,6 +142,18 @@ bool Parser::walkSchema(Span<const uint8_t> buffer, Deserializer* deserializer, 
 void Parser::walkImpl(const ROSMessage* msg, FieldLeaf& leaf, bool store, WalkState& state) const {
   auto* deserializer = state.deserializer;
   auto* writer = state.writer;
+
+  // rosidl gives a .msg type without fields a uint8 placeholder member: it is serialized in CDR
+  // but never appears in the message definition.
+  if (_schema_format == ROS_MSG && deserializer->isROS2() &&
+      std::none_of(msg->fields().begin(), msg->fields().end(),
+                   [](const ROSField& field) { return !field.isConstant(); })) {
+    if (deserializer->bytesLeft() > 0) {
+      deserializer->deserialize(UINT8);
+    }
+    return;
+  }
+
   size_t index_s = 0;
   const auto pre_key_suffix_size = leaf.key_suffixes.size();
   const auto current_depth = fieldDepth(leaf.node);

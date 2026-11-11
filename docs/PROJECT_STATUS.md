@@ -1,13 +1,66 @@
 # 项目状态
 
-更新时间：2026-09-21
+更新时间：2026-11-11
 
 ## 结论
 
-当前版本为 `3.17.8`，这是该恢复线的首个正式版。除 PlotJuggler 3.17.2 上游基线、重新实现的
+当前版本为 `3.17.9`，在首个正式版 `3.17.8` 基础上修复 ROS bag 加载过慢与解码
+错误、updater 和发布流程问题。除 PlotJuggler 3.17.2 上游基线、重新实现的
 ROS bag 插件和在线更新外，已从 2026-08-05 至 08-19 的历史补丁恢复 Studio
 二次开发 UI：双标尺、测量表、交点标签、智能 linked zoom、自动 fit、品牌化及
-MQTT/ZMQ 可靠性修复。当前源码完成增量构建并通过 127/127 CTest。
+MQTT/ZMQ 可靠性修复。当前源码完成干净构建并通过 135/135 CTest 与 updater E2E。
+
+## 3.17.9 修复（相对 3.17.8）
+
+以下修复已在本机 MSYS2 UCRT64 干净构建、CTest、updater E2E、便携打包与
+smoke test 中验证。
+
+ROS bag 加载性能（无界面全选加载，含启动；同一台机器）：
+
+| 测试包 | 3.17.8 | 3.17.9 |
+| --- | --- | --- |
+| ROS2 SQLite3，931 MiB，77.5 万条消息 | 189.3 s | 15.8 s |
+| ROS1 bz2，chunk 时间窗口重叠，7.4 MiB | 约 480 s（worker 474.9 s） | 2.6 s |
+| ROS1 未压缩，chunk 时间窗口重叠，13 MiB | 7.3 s | 2.4 s |
+| ROS1，300 个 Topic / 6.1 万条序列，296 MiB | 73.8 s | 28.7 s |
+| ROS1 bz2，解压后 160 MiB | 12.0 s | 5.4 s |
+| ROS1 相机 + 点云，2.2 GiB | 25.5 s | 14.4 s |
+| ROS1 数值，802 MiB | 18.5 s | 19.3 s（持平） |
+
+- ROS2 SQLite3/MCAP 包改走 `raw-v1`：worker 只读原始 CDR 字节并附带 `ros2msg`
+  定义（包内无定义时由内置类型库生成），由 C++ `ParserROS` 解码；此前逐条在
+  Python 中反序列化并展开字段。包内只有 IDL 定义或类型未知的 Topic 仍由 Python
+  解码。兼容性变化：ROS2 曲线命名与 ROS1/原生 MCAP 一致（如 JointState 为
+  `/joint_states/<关节名>/position`，不再输出消息常量），3.17.8 保存的布局中
+  这类 ROS2 曲线可能需要重新拖入；ROS2 `byte` 字段 ≥128 不再显示为负数。
+- `ParserROS` 补上 ROS2 为无字段消息序列化的 1 字节占位：嵌套此类消息（如
+  `test_msgs/Arrays` 中的 `Constants[3]`）时，后续字段原本全部错位、整个 Topic
+  解码失败，原生 MCAP loader 在 3.17.8 中同样受影响。
+- C++ 解码某 Topic 的第一条消息就失败时，该 Topic 整体改由 Python 解码，不再
+  丢失；回退成功不再弹出“部分数据未能解码”，回退原因写入性能日志。
+- 内置 rosbags 不再因包内存在 `ros2idl` 或 `unknown`（录制时找不到定义）编码的
+  定义而整包打不开（3.17.8 同样报 `AssertionError`）。
+- ROS1 读取不再使用 rosbags 只缓存单个 chunk 的 `Reader.messages()`：chunk 时间
+  窗口重叠（按 header stamp 写包、合并录制、sim time）时它几乎每条消息都重新
+  解压一次 chunk。现在每个 chunk 只解压一次、用完即释放（上限 512 MiB），压缩
+  chunk 由线程池提前解压，输出顺序与原实现逐字节一致。
+- 曲线树不再为每条曲线构造 `QSettings`（每次都会查询 INI 文件属性，在装有安全
+  软件的机器上约 0.7 ms），子节点改为哈希查找；数值列刷新和标尺读数也不再逐值
+  读取设置。
+
+- worker 强制 UTF-8 输出：中文 Windows 管道默认 GBK，消息定义含中文注释的
+  ROS1 bag 会让 Topic 索引不是合法 UTF-8，3.17.8 无法打开这类 bag。
+- worker 不再丢弃 numpy bool 数组（如 `bool[]` 字段），数值数组展开约快 2 倍。
+- 便携 Python 启动 worker 时移除 `PYTHONHOME`/`PYTHONPATH` 并禁用用户
+  site-packages，避免在已 source ROS/Conda 的终端中启动失败；worker 失败时
+  显示 Python 报错摘要。
+- 安装树完整安装 `runtime/rosbag_python`；此前从 `install/` 运行缺少 `rosbags`。
+- 标尺位于曲线最后一个采样点或之后时不再错误吸附到第一个采样点。
+- updater 启动即持有父进程句柄，修复 Studio 在预检期间先退出导致更新失败（退出码
+  7）；健康探针超时会先结束探针再回滚。
+- 超出 `minimumSupportedVersion` 的更新只下载不自动安装；更新请求使用系统代理。
+- CI 在发布前拒绝覆盖更新的版本（重推旧 tag 不会删除最新 Release），并运行
+  updater E2E。
 
 此前发布的 `3.17.2-studio.1` 缺少这些 UI 接线，已从 GitHub 撤下。发布流程现
 要求 tag 构建、测试、打包和复验成功后公开 Release，并在成功后自动删除其他
@@ -37,8 +90,9 @@ Release 和旧 `v*` 发布标签，只保留最新版。
 - `DataLoadROSBag` 重新建立插件、解析库、测试目标及 Python worker 打包规则。
 - 插件先异步检查 bag 索引并显示可过滤、可记忆的 Topic 选择框，再由后台
   `QProcess` 启动 `runtime/rosbag_python/extract_rosbag.py`。worker 在源头过滤
-  connection。ROS1 `.bag` 默认输出 `raw-v1` 原始消息字节，由 C++ `ParserROS`
-  按 bag 自带 schema 解码；schema 失败的 Topic 回退 `binary-v1`。文本协议仍可
+  connection。ROS1 `.bag` 与 ROS2 SQLite3 包默认输出 `raw-v1` 原始消息字节，由
+  C++ `ParserROS` 按 bag 自带 schema 解码；没有可用 schema 或第一条消息即解码
+  失败的 Topic 回退 `binary-v1`。文本协议仍可
   通过 `RSPJ_FORCE_LEGACY_ROSBAG_PROTOCOL` 强制。数据仅在 worker 正常完成后合并。
 - 加载和检查均支持取消且不再用 `processEvents()` 阻塞 UI；标准 MCAP 默认交给
   原生 C++ loader，可通过 `RSPJ_ENABLE_PYTHON_MCAP_FALLBACK` 临时启用 Python
@@ -51,6 +105,8 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   验收结果为：ROS1 4.93 秒、ROS2 SQLite3 4.31 秒、ROS2 MCAP 4.28 秒，worker
   峰值工作集分别为 57.54、44.24、48.45 MiB。该结果验证可重复路径，不替代
   现场真实 bag 和 GUI 合并/重绘验收。
+- `3.17.9` 修复 ROS bag 加载过慢与解码错误、updater 竞态和发布保护问题，详见
+  上文“3.17.9 修复”。
 - `3.17.8` 将上述候选能力作为正式版发布，更新通道为 `stable`。构建脚本在
   MSYS2 将 `gcc-libs` 拆成 `cc-libs` 后仍会强制装上 NumPy/OpenBLAS（必要时
   `--nodeps`），ROS bag E2E 也固定使用该 UCRT64 Python。`v3.17.5` 至
@@ -78,7 +134,7 @@ Release 和旧 `v*` 发布标签，只保留最新版。
   恢复测试，还已接入 `CurveTracker`、`PlotWidget` 和 `MainWindow` 运行路径。
 - 已恢复 A/B 标尺直接拖动、可见曲线测量表、帧号与差值、选中高亮、标签碰撞
   避让、时间域不兼容时独立 fit，以及加载/重载/布局后的自动 fit。
-- `STUDIO_VERSION` 已设置为 `3.17.8`，并成为 CMake 的唯一版本源；
+- `STUDIO_VERSION` 已设置为 `3.17.9`，并成为 CMake 的唯一版本源；
   configure 严格校验 SemVer，`PJ_STUDIO_VERSION` 通过 base target 公开给应用和插件。
 - Windows CMake 目标和产物均为 `RosPlotJugglerStudio`，插件安装到
   `bin/plugins`，运行时按应用目录相对定位。

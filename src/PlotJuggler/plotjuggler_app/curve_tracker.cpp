@@ -241,14 +241,15 @@ std::optional<QPointF> curvePointAt(const QwtPlotCurve* curve, double x)
     return first;
   }
 
+  // qwtUpperSampleIndex() returns -1 when x is at or beyond the last sample.
   const int index = qwtUpperSampleIndex<QPointF>(*curve->data(), x, CompareX());
-  if (index <= 0)
-  {
-    return first;
-  }
-  if (index >= static_cast<int>(curve->dataSize()))
+  if (index < 0 || index >= static_cast<int>(curve->dataSize()))
   {
     return last;
+  }
+  if (index == 0)
+  {
+    return first;
   }
   const QPointF left = curve->sample(index - 1);
   const QPointF right = curve->sample(index);

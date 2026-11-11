@@ -88,7 +88,10 @@ class Sqlite3Reader:
                 )
             ]
             for typ in msgtypes:
-                assert typ['encoding'] == 'ros2msg'
+                # rosbag2 also stores ros2idl definitions, and 'unknown' with an empty
+                # definition when the recorder could not find one.
+                if typ['encoding'] != 'ros2msg':
+                    continue
                 types = get_types_from_msg(typ['msgdef'], typ['name'])
 
                 store = Typestore()
@@ -120,7 +123,9 @@ class Sqlite3Reader:
             'ros2idl': MessageDefinitionFormat.IDL,
         }
         return {
-            x['name']: MessageDefinition(fmtmap[x['encoding']], x['msgdef']) for x in self.msgtypes
+            x['name']: MessageDefinition(fmtmap[x['encoding']], x['msgdef'])
+            for x in self.msgtypes
+            if x['encoding'] in fmtmap
         }
 
     def messages(

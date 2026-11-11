@@ -20,6 +20,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell's per-entry progress rendering makes Compress-Archive far slower.
+$ProgressPreference = "SilentlyContinue"
 Set-StrictMode -Version Latest
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
@@ -190,6 +192,9 @@ the plugin directory, and the Python ROS1/ROS2 bag runtime.
 & (Join-Path $PSScriptRoot "smoke-test-portable.ps1") -PackageRoot $PackageRoot
 
 Compress-Archive -LiteralPath $PackageRoot -DestinationPath $ArchivePath -CompressionLevel Optimal
+if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+    throw "Compress-Archive did not create $ArchivePath; a package file may still be in use."
+}
 $ArchiveHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 "$ArchiveHash  $ArchiveName" | Set-Content -LiteralPath (Join-Path $ReleaseDirectory "SHA256SUMS") -Encoding ASCII
 "$ArchiveHash  $ArchiveName" | Set-Content -LiteralPath "$ArchivePath.sha256" -Encoding ASCII

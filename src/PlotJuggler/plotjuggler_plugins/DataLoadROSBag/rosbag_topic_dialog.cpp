@@ -19,6 +19,25 @@ namespace PJ
 namespace ROSBag
 {
 
+namespace
+{
+constexpr int MAX_REMEMBERED_SELECTIONS = 64;
+
+// Every opened bag gets its own settings group; keep the INI file bounded.
+void rememberSelection(QSettings& settings, const QString& settings_key)
+{
+  const QString recent_key = QStringLiteral("ROSBagTopicDialog/recentSelections");
+  QStringList recent = settings.value(recent_key).toStringList();
+  recent.removeAll(settings_key);
+  recent.prepend(settings_key);
+  while (recent.size() > MAX_REMEMBERED_SELECTIONS)
+  {
+    settings.remove(recent.takeLast());
+  }
+  settings.setValue(recent_key, recent);
+}
+}  // namespace
+
 TopicDialog::TopicDialog(const std::vector<TopicInfo>& topics, const QString& settingsKey,
                          QWidget* parent)
   : QDialog(parent), _settings_key(settingsKey)
@@ -133,6 +152,7 @@ void TopicDialog::accept()
   settings.setValue(_settings_key + QStringLiteral("/topics"), topics);
   settings.setValue(_settings_key + QStringLiteral("/maxArray"), maxArraySize());
   settings.setValue(QStringLiteral("ROSBagTopicDialog/geometry"), saveGeometry());
+  rememberSelection(settings, _settings_key);
   QDialog::accept();
 }
 

@@ -44,29 +44,64 @@ void log(const QString& message)
   stream.flush();
 }
 
-bool waitForParent(quint64 pid, QString* error)
+// The parent is asked to close as soon as the updater starts, so its handle must be
+// opened before the slower preflight checks or the PID may already be gone.
+class ParentProcess
 {
+public:
+  explicit ParentProcess(quint64 pid)
+  {
 #ifdef Q_OS_WIN
-  HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
-  if (!process)
-  {
-    *error = QStringLiteral("Unable to open parent process");
-    return false;
-  }
-  const DWORD result = WaitForSingleObject(process, 5 * 60 * 1000);
-  CloseHandle(process);
-  if (result != WAIT_OBJECT_0)
-  {
-    *error = QStringLiteral("Parent application did not exit normally within five minutes");
-    return false;
-  }
-  return true;
+    _handle = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    _already_exited = !_handle && GetLastError() == ERROR_INVALID_PARAMETER;
 #else
-  Q_UNUSED(pid);
-  *error = QStringLiteral("The updater is supported only on Windows");
-  return false;
+    Q_UNUSED(pid);
 #endif
-}
+  }
+
+  ~ParentProcess()
+  {
+#ifdef Q_OS_WIN
+    if (_handle)
+    {
+      CloseHandle(_handle);
+    }
+#endif
+  }
+
+  ParentProcess(const ParentProcess&) = delete;
+  ParentProcess& operator=(const ParentProcess&) = delete;
+
+  bool waitForExit(QString* error)
+  {
+#ifdef Q_OS_WIN
+    if (_already_exited)
+    {
+      return true;
+    }
+    if (!_handle)
+    {
+      *error = QStringLiteral("Unable to open parent process");
+      return false;
+    }
+    if (WaitForSingleObject(_handle, 5 * 60 * 1000) != WAIT_OBJECT_0)
+    {
+      *error = QStringLiteral("Parent application did not exit normally within five minutes");
+      return false;
+    }
+    return true;
+#else
+    *error = QStringLiteral("The updater is supported only on Windows");
+    return false;
+#endif
+  }
+
+private:
+#ifdef Q_OS_WIN
+  HANDLE _handle = nullptr;
+#endif
+  bool _already_exited = false;
+};
 
 bool renameDirectory(const QString& from, const QString& to)
 {
@@ -114,6 +149,13 @@ bool runHealthProbe(const QString& application, const QString& healthFile, int t
   {
     process.waitForFinished(100);
   }
+  // The probe is a private instance of the new version without user data; stop it
+  // before rollback so its files are no longer in use.
+  const auto terminateProbe = [&process]() {
+    log(QStringLiteral("Terminating the health probe before rollback"));
+    process.kill();
+    process.waitForFinished(10000);
+  };
   if (!QFileInfo::exists(healthFile))
   {
     *error = process.state() == QProcess::NotRunning
@@ -121,14 +163,14 @@ bool runHealthProbe(const QString& application, const QString& healthFile, int t
                  : QStringLiteral("Updated application health confirmation timed out");
     if (process.state() != QProcess::NotRunning)
     {
-      log(QStringLiteral("Health probe is still running; refusing to force-kill it"));
+      terminateProbe();
     }
     return false;
   }
   if (process.state() != QProcess::NotRunning && !process.waitForFinished(15000))
   {
     *error = QStringLiteral("Health probe confirmed startup but did not exit normally");
-    log(QStringLiteral("Health probe remained running; refusing to force-kill it"));
+    terminateProbe();
     return false;
   }
   return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
@@ -148,6 +190,7 @@ int main(int argc, char* argv[])
     log(QStringLiteral("Argument validation failed: %1").arg(error));
     return 2;
   }
+  ParentProcess parent(options.parentPid);
 
   QString installedVersion;
   if (!QFileInfo(options.packagePath).isFile() ||
@@ -181,7 +224,7 @@ int main(int argc, char* argv[])
     log(QStringLiteral("Insufficient free disk space for staging and rollback"));
     return 6;
   }
-  if (!waitForParent(options.parentPid, &error))
+  if (!parent.waitForExit(&error))
   {
     log(error);
     return 7;

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MPL-2.0
 [CmdletBinding()]
 param(
-    [string]$BuildDirectory
+    [string]$BuildDirectory,
+    [string]$ToolchainRoot
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,7 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $BuildDirectory) {
     $BuildDirectory = Join-Path $ProjectRoot "build\windows-ucrt64"
 }
+if (-not $ToolchainRoot) { $ToolchainRoot = Join-Path $ProjectRoot ".toolchain\msys64" }
 $TestRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "artifacts\test"))
 $ExpectedRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "artifacts")) +
     [IO.Path]::DirectorySeparatorChar + "test"
@@ -21,7 +23,7 @@ if (-not $TestRoot.Equals($ExpectedRoot, [StringComparison]::OrdinalIgnoreCase))
 $BuiltUpdater = Join-Path $BuildDirectory "bin\RosPlotJugglerUpdater.exe"
 $BuiltHelper = Join-Path $BuildDirectory "bin\updater_test_health_helper.exe"
 $SourceExtractionScript = Join-Path $ProjectRoot "tools\updater\extract-update.ps1"
-$UcrtBin = Join-Path $ProjectRoot ".toolchain\msys64\ucrt64\bin"
+$UcrtBin = Join-Path $ToolchainRoot "ucrt64\bin"
 foreach ($Required in @($BuiltUpdater, $BuiltHelper, $SourceExtractionScript)) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
         throw "Updater E2E prerequisite is missing: $Required"
@@ -104,7 +106,8 @@ function Invoke-UpdaterCase {
         [ValidateSet("pass", "fail")][string]$HealthMode,
         [int]$ExpectedExitCode,
         [string]$ExpectedInstalledVersion,
-        [string]$ExpectedLaunchVersion
+        [string]$ExpectedLaunchVersion,
+        [switch]$ParentAlreadyExited
     )
     $CaseRoot = Join-Path $TestRoot $Name
     New-Item -ItemType Directory -Path $CaseRoot -Force | Out-Null
@@ -120,9 +123,18 @@ function Invoke-UpdaterCase {
     $LaunchMarker = Join-Path $CaseRoot "launched-version.txt"
     $env:RSPJ_TEST_LAUNCH_MARKER = $LaunchMarker
 
-    $Parent = Start-Process -FilePath "powershell.exe" -ArgumentList @(
-        "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 750"
-    ) -PassThru
+    if ($ParentAlreadyExited) {
+        # Exited processes stay openable while any tool (for example endpoint security)
+        # holds a handle, so use a PID far above the CID table limit to model a Studio
+        # instance that closed before the updater finished its preflight checks.
+        $ParentId = 2147483644
+    }
+    else {
+        $Parent = Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 750"
+        ) -PassThru
+        $ParentId = $Parent.Id
+    }
     $Arguments = @(
         "--protocol", "1",
         "--package", $Archive,
@@ -131,7 +143,7 @@ function Invoke-UpdaterCase {
         "--version", "2.0.0",
         "--sha256", $Hash,
         "--size", [string]$Size,
-        "--parent-pid", [string]$Parent.Id,
+        "--parent-pid", [string]$ParentId,
         "--health-timeout", "5"
     )
     $Process = Start-Process -FilePath $Updater -ArgumentList $Arguments -WorkingDirectory $Tools `
@@ -205,8 +217,9 @@ try {
     Assert-UnsafeArchiveRejected "absolute" "/absolute.txt"
     Assert-UnsafeArchiveRejected "symlink" "link" -SymbolicLink
     Invoke-UpdaterCase "success" "pass" 0 "2.0.0" "2.0.0"
+    Invoke-UpdaterCase "parent-exited" "pass" 0 "2.0.0" "2.0.0" -ParentAlreadyExited
     Invoke-UpdaterCase "rollback" "fail" 14 "1.0.0" "1.0.0"
-    Write-Host "Updater E2E passed: archive defenses, successful swap, external config, and rollback."
+    Write-Host "Updater E2E passed: archive defenses, successful swap, early parent exit, external config, and rollback."
 }
 finally {
     $env:LOCALAPPDATA = $OriginalLocalAppData

@@ -8,6 +8,7 @@
 #define CURVETREE_VIEW_H
 
 #include "curvelist_view.h"
+#include <QHash>
 #include <QTreeWidget>
 #include <functional>
 
@@ -47,11 +48,17 @@ public:
 
   virtual void keyPressEvent(QKeyEvent*) override;
 
+  void reloadSettings();
+
 private:
   void expandChildren(bool expanded, QTreeWidgetItem* item);
+  QTreeWidgetItem* findChild(QTreeWidgetItem* parent, const QString& text);
 
   int _hidden_count = 0;
   int _leaf_count = 0;
+  bool _use_separator = true;
+  // Children by text, built lazily per parent; invalidated whenever items are removed.
+  QHash<QTreeWidgetItem*, QHash<QString, QTreeWidgetItem*>> _children_by_text;
 
   QTimer* _tooltip_timer = nullptr;
   QTreeWidgetItem* _tooltip_item = nullptr;

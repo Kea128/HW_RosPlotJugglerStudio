@@ -649,9 +649,8 @@ std::map<QString, QColor> MainWindow::visibleNumericCurves()
   return curves;
 }
 
-QString MainWindow::formatRulerTime(double absolute_time) const
+QString MainWindow::formatRulerTime(double absolute_time, int precision) const
 {
-  const int precision = QSettings().value("Preferences::precision", 3).toInt();
   if (ui->buttonUseDateTime->isChecked())
   {
     return QDateTime::fromMSecsSinceEpoch(std::llround(absolute_time * 1000.0))
@@ -708,14 +707,15 @@ void MainWindow::updateRulerMetrics()
     return;
   }
 
+  const int precision = QSettings().value("Preferences::precision", 3).toInt();
   const bool dual = ui->buttonReferencePoint->isChecked() && _reference_tracker_time.has_value();
   _ruler_metrics_dual = dual;
   _ruler_metrics_values->setText(
       dual ? tr("A %1    B %2    Δt %3 s")
-                 .arg(formatRulerTime(_tracker_time),
-                      formatRulerTime(*_reference_tracker_time),
+                 .arg(formatRulerTime(_tracker_time, precision),
+                      formatRulerTime(*_reference_tracker_time, precision),
                       QString::number(*_reference_tracker_time - _tracker_time, 'g', 9))
-           : tr("A %1").arg(formatRulerTime(_tracker_time)));
+           : tr("A %1").arg(formatRulerTime(_tracker_time, precision)));
 
   const QStringList headers =
       dual ? QStringList{ tr("Signal"), tr("A value"), tr("A frame"), tr("B value"),
@@ -726,7 +726,6 @@ void MainWindow::updateRulerMetrics()
   _ruler_metrics_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
   _ruler_metrics_table->setRowCount(static_cast<int>(curves.size()));
 
-  const int precision = QSettings().value("Preferences::precision", 3).toInt();
   int row = 0;
   for (const auto& [name, color] : curves)
   {
@@ -3706,6 +3705,7 @@ void MainWindow::on_actionPreferences_triggered()
 
   PreferencesDialog dialog;
   dialog.exec();
+  _curvelist_widget->reloadSettings();
 
   QString theme = settings.value("Preferences::theme").toString();
 

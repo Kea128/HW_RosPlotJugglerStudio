@@ -77,6 +77,16 @@ UpdateCoordinator::UpdateCoordinator(QWidget* parentWidget)
     _downloadedPath = path;
     _readyManifest = _downloader.manifest();
     setState(State::Ready);
+    if (!_readyManifest.supportsCurrentVersion(QCoreApplication::applicationVersion()))
+    {
+      QMessageBox::information(
+          _parentWidget, tr("Update Downloaded"),
+          tr("The update package has been downloaded and verified:\n%1\n\n"
+             "This release cannot be installed automatically over the current version. "
+             "Extract it to a new folder to install it manually.")
+              .arg(QDir::toNativeSeparators(path)));
+      return;
+    }
     const auto answer = QMessageBox::question(
         _parentWidget, tr("Update Downloaded"),
         tr("The update package has been downloaded and verified:\n%1\n\n"
@@ -169,6 +179,15 @@ bool UpdateCoordinator::launchExternalUpdater(QString* error)
     if (error)
     {
       *error = tr("No verified update package is available.");
+    }
+    return false;
+  }
+  if (!_readyManifest.supportsCurrentVersion(QCoreApplication::applicationVersion()))
+  {
+    if (error)
+    {
+      *error = tr("This update is outside the direct-update support range and must be "
+                  "installed manually.");
     }
     return false;
   }

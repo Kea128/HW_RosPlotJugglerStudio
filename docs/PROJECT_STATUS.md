@@ -40,6 +40,10 @@ ROS bag 加载性能（无界面全选加载，含启动；同一台机器）：
   丢失；回退成功不再弹出“部分数据未能解码”，回退原因写入性能日志。
 - 内置 rosbags 不再因包内存在 `ros2idl` 或 `unknown`（录制时找不到定义）编码的
   定义而整包打不开（3.17.8 同样报 `AssertionError`）。
+- 适配 CI 使用的新版 MSYS2：MQTT 插件在 mosquitto 2.1 下额外链接
+  `libmosquitto_common`；便携包显式打包 Qt5Network 运行时按名加载的 OpenSSL
+  （OpenSSL 4 下为 `libssl-4-x64.dll`），smoke test 校验其主版本与 Qt 一致，避免
+  在线更新的 HTTPS 请求静默失败。
 - ROS1 读取不再使用 rosbags 只缓存单个 chunk 的 `Reader.messages()`：chunk 时间
   窗口重叠（按 header stamp 写包、合并录制、sim time）时它几乎每条消息都重新
   解压一次 chunk。现在每个 chunk 只解压一次、用完即释放（上限 512 MiB），压缩

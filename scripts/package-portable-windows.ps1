@@ -108,6 +108,24 @@ else {
     }
 }
 
+# Qt5Network loads OpenSSL by name at runtime instead of importing it, so the dependency
+# scan below only finds it when some other library happens to link it.
+$QtNetwork = Join-Path $BinDirectory "Qt5Network.dll"
+if (Test-Path -LiteralPath $QtNetwork -PathType Leaf) {
+    $QtNetworkText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($QtNetwork))
+    $BundledOpenSsl = @([regex]::Matches($QtNetworkText, 'lib(?:ssl|crypto)-[0-9a-z_-]+') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique |
+        Where-Object { Test-Path -LiteralPath (Join-Path $UcrtBin "$_.dll") -PathType Leaf })
+    foreach ($Kind in @("ssl", "crypto")) {
+        if (-not ($BundledOpenSsl | Where-Object { $_ -like "lib$Kind-*" })) {
+            throw "The OpenSSL lib$Kind that Qt5Network loads is not installed in $UcrtBin."
+        }
+    }
+    foreach ($Library in $BundledOpenSsl) {
+        Copy-Item -LiteralPath (Join-Path $UcrtBin "$Library.dll") -Destination $BinDirectory -Force
+    }
+}
+
 # Resolve non-system MinGW dependencies for the executable and every installed plugin.
 $AvailableDlls = @{}
 Get-ChildItem -LiteralPath $UcrtBin -Filter "*.dll" -File | ForEach-Object {

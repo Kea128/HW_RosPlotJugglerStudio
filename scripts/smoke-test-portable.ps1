@@ -49,11 +49,17 @@ foreach ($PluginName in @("*DataLoadMCAP.dll", "*DataLoadROSBag.dll")) {
         throw "Required loader plugin was not installed: $PluginName"
     }
 }
-# Qt5Network loads OpenSSL at runtime, so dependency scanning cannot guarantee it is
-# packaged; the HTTPS update checker fails without it.
-foreach ($OpenSslPattern in @("libssl-*.dll", "libcrypto-*.dll")) {
-    if (-not (Get-ChildItem -LiteralPath $BinDirectory -Filter $OpenSslPattern -File)) {
-        throw "OpenSSL runtime required by the update checker is missing: $OpenSslPattern"
+# Qt5Network loads OpenSSL by name at runtime, so the HTTPS update checker only works
+# when the package contains the exact OpenSSL major version Qt was built for.
+$QtNetworkText = [Text.Encoding]::ASCII.GetString(
+    [IO.File]::ReadAllBytes((Join-Path $BinDirectory "Qt5Network.dll")))
+$OpenSslNames = @([regex]::Matches($QtNetworkText, 'lib(?:ssl|crypto)-[0-9a-z_-]+') |
+    ForEach-Object { $_.Value } | Sort-Object -Unique)
+foreach ($Kind in @("ssl", "crypto")) {
+    if (-not ($OpenSslNames | Where-Object {
+                $_ -like "lib$Kind-*" -and (Test-Path -LiteralPath (Join-Path $BinDirectory "$_.dll"))
+            })) {
+        throw "OpenSSL lib$Kind loaded by Qt5Network is not packaged (expected one of: $($OpenSslNames -join ', '))."
     }
 }
 

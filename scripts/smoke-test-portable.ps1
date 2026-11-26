@@ -49,6 +49,19 @@ foreach ($PluginName in @("*DataLoadMCAP.dll", "*DataLoadROSBag.dll")) {
         throw "Required loader plugin was not installed: $PluginName"
     }
 }
+$UpdaterRuntimeList = Join-Path $BinDirectory "updater\runtime-dlls.txt"
+if (-not (Test-Path -LiteralPath $UpdaterRuntimeList -PathType Leaf)) {
+    throw "Updater runtime list is missing: $UpdaterRuntimeList"
+}
+$UpdaterRuntime = @(Get-Content -LiteralPath $UpdaterRuntimeList | Where-Object { $_ })
+if ($UpdaterRuntime -notcontains "Qt5Core.dll") {
+    throw "Updater runtime list does not contain Qt5Core.dll: $($UpdaterRuntime -join ', ')"
+}
+foreach ($UpdaterDll in $UpdaterRuntime) {
+    if (-not (Test-Path -LiteralPath (Join-Path $BinDirectory $UpdaterDll) -PathType Leaf)) {
+        throw "DLL listed for the updater is not packaged: $UpdaterDll"
+    }
+}
 # Qt5Network loads OpenSSL by name at runtime, so the HTTPS update checker only works
 # when the package contains the exact OpenSSL major version Qt was built for.
 $QtNetworkText = [Text.Encoding]::ASCII.GetString(

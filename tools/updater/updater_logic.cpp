@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -11,6 +12,7 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QSet>
+#include <QThread>
 #include <QUuid>
 
 namespace StudioUpdater
@@ -271,6 +273,126 @@ quint64 directorySize(const QString& root)
     total += static_cast<quint64>(iterator.fileInfo().size());
   }
   return total;
+}
+
+QString newWorkDirectoryToken()
+{
+  return QUuid::createUuid().toString(QUuid::Id128).left(8);
+}
+
+QString workDirectoryPath(const QString& installRoot, WorkDirectory kind, const QString& token)
+{
+  const QFileInfo root(QDir::cleanPath(installRoot));
+  const QString label = kind == WorkDirectory::Staging  ? QStringLiteral("new")
+                        : kind == WorkDirectory::Backup ? QStringLiteral("old")
+                                                        : QStringLiteral("bad");
+  return QDir(root.absolutePath())
+      .filePath(QStringLiteral(".") + root.fileName() + QLatin1Char('-') + label +
+                QLatin1Char('-') + token);
+}
+
+bool isWorkDirectoryName(const QString& rootName, const QString& name)
+{
+  const QString root = QRegularExpression::escape(rootName);
+  const QString uuid =
+      QStringLiteral("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+  const QRegularExpression pattern(
+      QStringLiteral("^(?:\\.") + root + QStringLiteral("-(?:new|old|bad)-[0-9a-f]{8}|\\.") +
+          root + QStringLiteral("-(?:staging|backup)-") + uuid + QStringLiteral("|") + root +
+          QStringLiteral("\\.failed-") + uuid + QStringLiteral(")$"),
+      QRegularExpression::CaseInsensitiveOption);
+  return !rootName.isEmpty() && pattern.match(name).hasMatch();
+}
+
+int removeLeftoverWorkDirectories(const QString& installRoot)
+{
+  const QFileInfo root(QDir::cleanPath(installRoot));
+  int removed = 0;
+  const QFileInfoList entries = QDir(root.absolutePath())
+                                    .entryInfoList(QDir::Dirs | QDir::Hidden | QDir::NoSymLinks |
+                                                   QDir::NoDotAndDotDot);
+  for (const QFileInfo& entry : entries)
+  {
+    if (isWorkDirectoryName(root.fileName(), entry.fileName()) &&
+        QDir(entry.absoluteFilePath()).removeRecursively())
+    {
+      ++removed;
+    }
+  }
+  return removed;
+}
+
+bool renameDirectory(const QString& from, const QString& to, int timeoutMs, int* attempts)
+{
+  QElapsedTimer timer;
+  timer.start();
+  for (int attempt = 1;; ++attempt)
+  {
+    if (attempts)
+    {
+      *attempts = attempt;
+    }
+    if (QDir().rename(QDir::cleanPath(from), QDir::cleanPath(to)))
+    {
+      return true;
+    }
+    if (!QFileInfo::exists(from) || QFileInfo::exists(to) || timer.elapsed() >= timeoutMs)
+    {
+      return false;
+    }
+    QThread::msleep(250);
+  }
+}
+
+bool stageUpdaterRuntime(const QString& updaterDirectory, const QString& binDirectory,
+                         const QString& destination, QString* error)
+{
+  const auto copy = [&](const QString& source, const QString& name) {
+    if (!QFile::copy(source, QDir(destination).filePath(name)))
+    {
+      setError(error, QStringLiteral("Unable to copy updater component: %1").arg(name));
+      return false;
+    }
+    return true;
+  };
+  for (const QString& name :
+       { QStringLiteral("RosPlotJugglerUpdater.exe"), QStringLiteral("extract-update.ps1") })
+  {
+    if (!copy(QDir(updaterDirectory).filePath(name), name))
+    {
+      return false;
+    }
+  }
+
+  QFile list(QDir(updaterDirectory).filePath(QStringLiteral("runtime-dlls.txt")));
+  if (!list.exists())
+  {
+    return true;
+  }
+  if (!list.open(QIODevice::ReadOnly | QIODevice::Text))
+  {
+    setError(error, QStringLiteral("Unable to read the updater runtime list"));
+    return false;
+  }
+  static const QRegularExpression dllName(QStringLiteral("^[A-Za-z0-9._+-]+\\.dll$"));
+  for (const QByteArray& line : list.readAll().split('\n'))
+  {
+    const QString name = QString::fromUtf8(line).trimmed();
+    if (name.isEmpty())
+    {
+      continue;
+    }
+    if (!dllName.match(name).hasMatch())
+    {
+      setError(error, QStringLiteral("Invalid updater runtime entry: %1").arg(name));
+      return false;
+    }
+    if (!copy(QDir(binDirectory).filePath(name), name))
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace StudioUpdater

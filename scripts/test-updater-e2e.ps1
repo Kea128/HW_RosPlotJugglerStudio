@@ -107,12 +107,28 @@ function Invoke-UpdaterCase {
         [int]$ExpectedExitCode,
         [string]$ExpectedInstalledVersion,
         [string]$ExpectedLaunchVersion,
-        [switch]$ParentAlreadyExited
+        [switch]$ParentAlreadyExited,
+        [switch]$LegacyLeftover,
+        [switch]$HoldInstalledFile
     )
     $CaseRoot = Join-Path $TestRoot $Name
     New-Item -ItemType Directory -Path $CaseRoot -Force | Out-Null
     $InstallRoot = Join-Path $CaseRoot "install"
     New-InstallTree $InstallRoot "1.0.0" "pass"
+    if ($LegacyLeftover) {
+        # Updaters before 3.17.10 could not delete the DLLs they ran on.
+        Write-Utf8 (Join-Path $CaseRoot ".install-backup-$([Guid]::NewGuid())\bin\libstdc++-6.dll") "old"
+    }
+    $Holder = $null
+    if ($HoldInstalledFile) {
+        # Models a security scanner that keeps a file of the old version open while the
+        # updater swaps directories; Windows refuses to rename a directory with open files.
+        $HeldFile = (Join-Path $InstallRoot "version.txt").Replace("'", "''")
+        $Holder = Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru -ArgumentList @(
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+            "`$f = [IO.File]::Open('$HeldFile', 'Open', 'Read', 'Read'); Start-Sleep -Seconds 15; `$f.Dispose()"
+        )
+    }
     $Archive = New-UpdateArchive $CaseRoot "2.0.0" $HealthMode
     $Hash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
     $Size = (Get-Item -LiteralPath $Archive).Length
@@ -148,10 +164,16 @@ function Invoke-UpdaterCase {
     )
     $Process = Start-Process -FilePath $Updater -ArgumentList $Arguments -WorkingDirectory $Tools `
         -PassThru -Wait
+    $Log = Join-Path $TestLocalAppData "RosPlotJugglerStudio\Updater\updater.log"
+    $LogText = if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log -Raw } else { "<missing>" }
+    if ($Holder) {
+        $Holder.WaitForExit()
+    }
     if ($Process.ExitCode -ne $ExpectedExitCode) {
-        $Log = Join-Path $TestLocalAppData "RosPlotJugglerStudio\Updater\updater.log"
-        $LogText = if (Test-Path -LiteralPath $Log) { Get-Content -LiteralPath $Log -Raw } else { "<missing>" }
         throw "$Name updater exit code was $($Process.ExitCode), expected $ExpectedExitCode.`n$LogText"
+    }
+    if ($HoldInstalledFile -and $LogText -notmatch ("Renaming " + [regex]::Escape($InstallRoot) + " succeeded after \d+ attempts")) {
+        throw "$Name did not retry the blocked directory swap.`n$LogText"
     }
 
     $Deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -169,8 +191,8 @@ function Invoke-UpdaterCase {
     if ((Get-FileHash -LiteralPath $ExternalConfig -Algorithm SHA256).Hash -ne $ConfigHash) {
         throw "$Name modified external configuration."
     }
-    $Leftovers = Get-ChildItem -LiteralPath $CaseRoot -Directory |
-        Where-Object { $_.Name -match '^\..+-(staging|backup|failed)-' }
+    $Leftovers = Get-ChildItem -LiteralPath $CaseRoot -Directory -Force |
+        Where-Object { $_.Name -match '^\..+-(new|old|bad|staging|backup)-|\.failed-' }
     if ($Leftovers) {
         throw "$Name left staging/backup directories: $($Leftovers.Name -join ', ')"
     }
@@ -216,10 +238,11 @@ try {
     Assert-UnsafeArchiveRejected "traversal" "../escaped.txt"
     Assert-UnsafeArchiveRejected "absolute" "/absolute.txt"
     Assert-UnsafeArchiveRejected "symlink" "link" -SymbolicLink
-    Invoke-UpdaterCase "success" "pass" 0 "2.0.0" "2.0.0"
+    Invoke-UpdaterCase "success" "pass" 0 "2.0.0" "2.0.0" -LegacyLeftover
     Invoke-UpdaterCase "parent-exited" "pass" 0 "2.0.0" "2.0.0" -ParentAlreadyExited
+    Invoke-UpdaterCase "blocked-swap" "pass" 0 "2.0.0" "2.0.0" -HoldInstalledFile
     Invoke-UpdaterCase "rollback" "fail" 14 "1.0.0" "1.0.0"
-    Write-Host "Updater E2E passed: archive defenses, successful swap, early parent exit, external config, and rollback."
+    Write-Host "Updater E2E passed: archive defenses, successful swap, leftover cleanup, early parent exit, blocked swap retry, external config, and rollback."
 }
 finally {
     $env:LOCALAPPDATA = $OriginalLocalAppData

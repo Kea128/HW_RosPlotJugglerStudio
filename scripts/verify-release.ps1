@@ -108,6 +108,11 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $Zip = [IO.Compression.ZipFile]::OpenRead($Archive.FullName)
 try {
+    # The update extractor only treats "/" as a separator.
+    $BackslashEntry = $Zip.Entries | Where-Object { $_.FullName.Contains("\") } | Select-Object -First 1
+    if ($BackslashEntry) {
+        throw "Archive entries must use '/' separators: $($BackslashEntry.FullName)"
+    }
     $MarkerEntries = @($Zip.Entries | Where-Object {
         $_.FullName.Replace("\", "/") -ceq "RosPlotJugglerStudio/manifest.json"
     })

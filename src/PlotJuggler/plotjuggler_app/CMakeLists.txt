@@ -184,6 +184,10 @@ endif()
 
 target_compile_definitions(${PJ_APP_TARGET} PRIVATE PJ_INSTALLATION="${PJ_INSTALLATION}")
 
+if(WIN32)
+  target_link_libraries(${PJ_APP_TARGET} PRIVATE rspj_updater_logic)
+endif()
+
 target_include_directories(
   ${PJ_APP_TARGET}
   PRIVATE

@@ -11,7 +11,6 @@
 #include <QStorageInfo>
 #include <QTextStream>
 #include <QThread>
-#include <QUuid>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -105,13 +104,22 @@ private:
 
 bool renameDirectory(const QString& from, const QString& to)
 {
-  return QDir().rename(QDir::cleanPath(from), QDir::cleanPath(to));
+  int attempts = 0;
+  const bool renamed = StudioUpdater::renameDirectory(from, to, 30000, &attempts);
+  if (attempts > 1)
+  {
+    log(QStringLiteral("Renaming %1 %2 after %3 attempts")
+            .arg(QDir::toNativeSeparators(from),
+                 renamed ? QStringLiteral("succeeded") : QStringLiteral("failed"),
+                 QString::number(attempts)));
+  }
+  return renamed;
 }
 
-bool restoreBackup(const QString& installRoot, const QString& backupRoot)
+bool restoreBackup(const QString& installRoot, const QString& backupRoot, const QString& token)
 {
-  const QString failedRoot = installRoot + QStringLiteral(".failed-") +
-                             QUuid::createUuid().toString(QUuid::WithoutBraces);
+  const QString failedRoot =
+      StudioUpdater::workDirectoryPath(installRoot, StudioUpdater::WorkDirectory::Failed, token);
   if (QFileInfo::exists(installRoot) && !renameDirectory(installRoot, failedRoot))
   {
     log(QStringLiteral("Rollback could not move failed installation aside"));
@@ -214,6 +222,13 @@ int main(int argc, char* argv[])
     log(error);
     return 5;
   }
+  // An updater cannot delete the DLLs it runs on, so earlier updates may have left
+  // the replaced version behind.
+  const int leftovers = StudioUpdater::removeLeftoverWorkDirectories(options.installRoot);
+  if (leftovers > 0)
+  {
+    log(QStringLiteral("Removed %1 directories left by earlier updates").arg(leftovers));
+  }
 
   QStorageInfo storage(installParent);
   storage.refresh();
@@ -236,10 +251,11 @@ int main(int argc, char* argv[])
     return 8;
   }
 
-  const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
-  const QString rootName = QFileInfo(options.installRoot).fileName();
-  const QString staging = QDir(installParent).filePath(QStringLiteral(".%1-staging-%2").arg(rootName, token));
-  const QString backup = QDir(installParent).filePath(QStringLiteral(".%1-backup-%2").arg(rootName, token));
+  const QString token = StudioUpdater::newWorkDirectoryToken();
+  const QString staging = StudioUpdater::workDirectoryPath(
+      options.installRoot, StudioUpdater::WorkDirectory::Staging, token);
+  const QString backup = StudioUpdater::workDirectoryPath(
+      options.installRoot, StudioUpdater::WorkDirectory::Backup, token);
   QDir(staging).removeRecursively();
   QDir(backup).removeRecursively();
   if (!QDir().mkpath(staging))
@@ -301,7 +317,7 @@ int main(int argc, char* argv[])
   if (!runHealthProbe(newApplication, healthFile, options.healthTimeoutSeconds, &error))
   {
     log(QStringLiteral("Health check failed: %1").arg(error));
-    if (!restoreBackup(options.installRoot, backup))
+    if (!restoreBackup(options.installRoot, backup, token))
     {
       return 13;
     }
@@ -315,7 +331,7 @@ int main(int argc, char* argv[])
   if (!QProcess::startDetached(newApplication, {}, QFileInfo(newApplication).absolutePath()))
   {
     log(QStringLiteral("Updated application failed to restart; rolling back"));
-    if (restoreBackup(options.installRoot, backup))
+    if (restoreBackup(options.installRoot, backup, token))
     {
       const QString oldApplication =
           QDir(options.installRoot).filePath(QStringLiteral("bin/RosPlotJugglerStudio.exe"));

@@ -168,6 +168,33 @@ if (-not (Test-Path -LiteralPath $PythonLibrarySource)) {
 New-Item -ItemType Directory -Path (Split-Path -Parent $PythonLibraryDestination) -Force | Out-Null
 Copy-Item -LiteralPath $PythonLibrarySource -Destination $PythonLibraryDestination -Recurse -Force
 
+# Neither the ROS bag worker nor the embedded interpreter uses test suites, IDLE/Tk,
+# packaging tools or -O/-OO bytecode. They hold the package's deepest paths, which
+# in-place updates must extract below a staging directory (checked before archiving).
+$SitePackages = Join-Path $PythonLibraryDestination "site-packages"
+foreach ($Relative in @("test", "idlelib", "tkinter", "turtledemo", "ensurepip",
+        "site-packages\pip", "site-packages\setuptools", "site-packages\_distutils_hack",
+        "site-packages\distlib", "site-packages\distutils-precedence.pth")) {
+    $UnusedPath = Join-Path $PythonLibraryDestination $Relative
+    if (Test-Path -LiteralPath $UnusedPath) { Remove-Item -LiteralPath $UnusedPath -Recurse -Force }
+}
+Get-ChildItem -LiteralPath $SitePackages -Directory |
+    Where-Object { $_.Name -match '^(pip|setuptools|distlib)-[^\\]+\.dist-info$' } |
+    Remove-Item -Recurse -Force
+Get-ChildItem -LiteralPath (Join-Path $PythonLibraryDestination "lib-dynload") -Filter "_tkinter*" -File |
+    Remove-Item -Force
+$RemovedTestDirectories = [Collections.Generic.List[string]]::new()
+foreach ($TestDirectory in @(Get-ChildItem -LiteralPath $SitePackages -Directory -Recurse -Filter "tests" |
+            Sort-Object FullName)) {
+    if ($RemovedTestDirectories | Where-Object { $TestDirectory.FullName.StartsWith("$_\", [StringComparison]::OrdinalIgnoreCase) }) {
+        continue
+    }
+    Remove-Item -LiteralPath $TestDirectory.FullName -Recurse -Force
+    $RemovedTestDirectories.Add($TestDirectory.FullName)
+}
+Get-ChildItem -LiteralPath $PythonLibraryDestination -Recurse -File -Filter "*.opt-*.pyc" |
+    Remove-Item -Force
+
 $RosbagRuntimeDestination = Join-Path $BinDirectory "runtime\rosbag_python"
 New-Item -ItemType Directory -Path $RosbagRuntimeDestination -Force | Out-Null
 Copy-Item -Path (Join-Path $ProjectRoot "runtime\rosbag_python\*") `
@@ -198,6 +225,28 @@ while ($Queue.Count -gt 0) {
     }
 }
 
+# The update coordinator copies these next to the updater, so that the updater does not
+# run on DLLs of the installation it replaces and can delete all of it afterwards.
+$UpdaterDirectory = Join-Path $BinDirectory "updater"
+$UpdaterRuntime = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$UpdaterQueue = [Collections.Generic.Queue[string]]::new()
+$UpdaterQueue.Enqueue((Join-Path $UpdaterDirectory "RosPlotJugglerUpdater.exe"))
+while ($UpdaterQueue.Count -gt 0) {
+    $Binary = $UpdaterQueue.Dequeue()
+    $Dependencies = & $ObjDump -p $Binary |
+        Select-String -Pattern 'DLL Name:\s*(.+)$' |
+        ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+    if ($LASTEXITCODE -ne 0) { throw "objdump failed while inspecting $Binary" }
+    foreach ($Dependency in $Dependencies) {
+        $Packaged = Join-Path $BinDirectory $Dependency
+        if ((Test-Path -LiteralPath $Packaged -PathType Leaf) -and $UpdaterRuntime.Add($Dependency)) {
+            $UpdaterQueue.Enqueue($Packaged)
+        }
+    }
+}
+Set-Content -LiteralPath (Join-Path $UpdaterDirectory "runtime-dlls.txt") `
+    -Value @($UpdaterRuntime) -Encoding ASCII
+
 @"
 RosPlotJuggler Studio $Version portable for Windows x86_64
 
@@ -209,10 +258,45 @@ the plugin directory, and the Python ROS1/ROS2 bag runtime.
     -PackageRoot $PackageRoot -VersionFile $VersionFile
 & (Join-Path $PSScriptRoot "smoke-test-portable.ps1") -PackageRoot $PackageRoot
 
-Compress-Archive -LiteralPath $PackageRoot -DestinationPath $ArchivePath -CompressionLevel Optimal
-if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
-    throw "Compress-Archive did not create $ArchivePath; a package file may still be in use."
+# Updates extract the archive below "<install parent>\.RosPlotJugglerStudio-new-<8 hex>\" with
+# Windows PowerShell, whose file paths must stay below 260 characters and directory paths
+# below 248. These limits keep updates working from install parents up to 80 characters.
+$PackageBase = (Split-Path -Parent $PackageRoot).Length + 1
+foreach ($Limit in @(@{ Kind = "file"; File = $true; Maximum = 143 },
+                     @{ Kind = "directory"; File = $false; Maximum = 131 })) {
+    $LongestPath = Get-ChildItem -LiteralPath $PackageRoot -Recurse -Force |
+        Where-Object { $_.PSIsContainer -ne $Limit.File } |
+        ForEach-Object { $_.FullName.Substring($PackageBase) } |
+        Sort-Object Length -Descending | Select-Object -First 1
+    if ($LongestPath.Length -gt $Limit.Maximum) {
+        throw "Package $($Limit.Kind) path is too long for in-place updates ($($LongestPath.Length) > $($Limit.Maximum)): $LongestPath"
+    }
 }
+
+# Compress-Archive in Windows PowerShell 5.1 stores "\" separators, which the update
+# extractor (and the ZIP specification) treat as part of a file name.
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$ArchiveBase = (Split-Path -Parent $PackageRoot).Length + 1
+$ArchiveStream = [IO.File]::Open($ArchivePath, [IO.FileMode]::CreateNew)
+try {
+    $Archive = [IO.Compression.ZipArchive]::new($ArchiveStream, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($Item in Get-ChildItem -LiteralPath $PackageRoot -Recurse -Force) {
+            $EntryName = $Item.FullName.Substring($ArchiveBase).Replace("\", "/")
+            if ($Item.PSIsContainer) {
+                if (-not (Get-ChildItem -LiteralPath $Item.FullName -Force | Select-Object -First 1)) {
+                    [void]$Archive.CreateEntry("$EntryName/")
+                }
+                continue
+            }
+            [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $Archive, $Item.FullName, $EntryName, [IO.Compression.CompressionLevel]::Optimal)
+        }
+    }
+    finally { $Archive.Dispose() }
+}
+finally { $ArchiveStream.Dispose() }
 $ArchiveHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 "$ArchiveHash  $ArchiveName" | Set-Content -LiteralPath (Join-Path $ReleaseDirectory "SHA256SUMS") -Encoding ASCII
 "$ArchiveHash  $ArchiveName" | Set-Content -LiteralPath "$ArchivePath.sha256" -Encoding ASCII

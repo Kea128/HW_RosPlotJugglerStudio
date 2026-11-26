@@ -14,6 +14,10 @@
 #include <QWidget>
 #include <climits>
 
+#ifdef Q_OS_WIN
+#include "updater_logic.h"
+#endif
+
 namespace StudioUpdate
 {
 
@@ -230,7 +234,8 @@ bool UpdateCoordinator::launchExternalUpdater(QString* error)
   }
   const QString updater = QDir(temporaryRoot).filePath(QStringLiteral("RosPlotJugglerUpdater.exe"));
   const QString script = QDir(temporaryRoot).filePath(QStringLiteral("extract-update.ps1"));
-  if (!QFile::copy(bundledUpdater, updater) || !QFile::copy(bundledScript, script))
+  if (!StudioUpdater::stageUpdaterRuntime(bundledDirectory, QCoreApplication::applicationDirPath(),
+                                          temporaryRoot))
   {
     QDir(temporaryRoot).removeRecursively();
     if (error)

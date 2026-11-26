@@ -3,8 +3,12 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <gtest/gtest.h>
+
+#include <chrono>
+#include <thread>
 
 using StudioUpdater::Options;
 
@@ -146,4 +150,145 @@ TEST(UpdaterStaging, RejectsInvalidMarker)
   createStagedPackage(staged, QStringLiteral("3.18.0"));
   writeFile(QDir(staged).filePath(QStringLiteral("manifest.json")), QByteArray("{}"));
   EXPECT_FALSE(StudioUpdater::validateStagedPackage(staged, QStringLiteral("3.18.0")));
+}
+
+TEST(UpdaterWorkDirectories, UsesShortNamesNextToTheInstallRoot)
+{
+  using StudioUpdater::WorkDirectory;
+  const QString root = QStringLiteral("C:/Tools/RosPlotJugglerStudio");
+  const QString token = StudioUpdater::newWorkDirectoryToken();
+  ASSERT_EQ(token.size(), 8);
+  const QString staging = StudioUpdater::workDirectoryPath(root, WorkDirectory::Staging, token);
+  EXPECT_EQ(staging, QStringLiteral("C:/Tools/.RosPlotJugglerStudio-new-") + token);
+  EXPECT_EQ(QFileInfo(staging).fileName().size(), 34);
+  EXPECT_EQ(StudioUpdater::workDirectoryPath(root, WorkDirectory::Backup, token),
+            QStringLiteral("C:/Tools/.RosPlotJugglerStudio-old-") + token);
+  EXPECT_EQ(StudioUpdater::workDirectoryPath(root, WorkDirectory::Failed, token),
+            QStringLiteral("C:/Tools/.RosPlotJugglerStudio-bad-") + token);
+  for (const WorkDirectory kind :
+       { WorkDirectory::Staging, WorkDirectory::Backup, WorkDirectory::Failed })
+  {
+    EXPECT_TRUE(StudioUpdater::isWorkDirectoryName(
+        QStringLiteral("RosPlotJugglerStudio"),
+        QFileInfo(StudioUpdater::workDirectoryPath(root, kind, token)).fileName()));
+  }
+}
+
+TEST(UpdaterWorkDirectories, RecognizesOnlyLeftoversOfTheSameInstall)
+{
+  const QString root = QStringLiteral("RosPlotJugglerStudio");
+  const QString uuid = QStringLiteral("0f8fad5b-d9cb-469f-a165-70867728950e");
+  EXPECT_TRUE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".RosPlotJugglerStudio-backup-") + uuid));
+  EXPECT_TRUE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".RosPlotJugglerStudio-staging-") + uuid));
+  EXPECT_TRUE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral("RosPlotJugglerStudio.failed-") + uuid));
+  EXPECT_TRUE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".RosPlotJugglerStudio-old-1234abcd")));
+
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(root, root));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".RosPlotJugglerStudio-old-1234abc")));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".RosPlotJugglerStudio-old-1234abcde")));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".RosPlotJugglerStudio-backup-not-a-uuid")));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(root, QStringLiteral(".OtherApp-old-1234abcd")));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(QStringLiteral("Studio"),
+                                                  QStringLiteral(".RosPlotJugglerStudio-old-1234abcd")));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(QStringLiteral("a.b"), QStringLiteral(".aXb-old-1234abcd")));
+  EXPECT_FALSE(StudioUpdater::isWorkDirectoryName(QString(), QStringLiteral(".-old-1234abcd")));
+}
+
+TEST(UpdaterWorkDirectories, RemovesLeftoversButKeepsInstallAndUnrelatedFolders)
+{
+  QTemporaryDir temporary;
+  const QString root = temporary.filePath(QStringLiteral("RosPlotJugglerStudio"));
+  createStagedPackage(root, QStringLiteral("3.17.10"));
+  const QString legacy =
+      temporary.filePath(QStringLiteral(".RosPlotJugglerStudio-backup-0f8fad5b-d9cb-469f-a165-70867728950e"));
+  const QString current = StudioUpdater::workDirectoryPath(
+      root, StudioUpdater::WorkDirectory::Backup, QStringLiteral("1234abcd"));
+  const QString unrelated = temporary.filePath(QStringLiteral(".OtherApp-old-1234abcd"));
+  const QString sibling = temporary.filePath(QStringLiteral("RosPlotJugglerStudio-3.17.8"));
+  writeFile(QDir(legacy).filePath(QStringLiteral("bin/libstdc++-6.dll")));
+  writeFile(QDir(current).filePath(QStringLiteral("bin/Qt5Core.dll")));
+  writeFile(QDir(unrelated).filePath(QStringLiteral("keep.txt")));
+  writeFile(QDir(sibling).filePath(QStringLiteral("keep.txt")));
+
+  EXPECT_EQ(StudioUpdater::removeLeftoverWorkDirectories(root), 2);
+  EXPECT_FALSE(QFileInfo::exists(legacy));
+  EXPECT_FALSE(QFileInfo::exists(current));
+  EXPECT_TRUE(QFileInfo::exists(QDir(root).filePath(QStringLiteral("manifest.json"))));
+  EXPECT_TRUE(QFileInfo::exists(QDir(unrelated).filePath(QStringLiteral("keep.txt"))));
+  EXPECT_TRUE(QFileInfo::exists(QDir(sibling).filePath(QStringLiteral("keep.txt"))));
+}
+
+TEST(UpdaterRename, RetriesWhileAFileInsideIsOpen)
+{
+  QTemporaryDir temporary;
+  const QString from = temporary.filePath(QStringLiteral("from"));
+  const QString to = temporary.filePath(QStringLiteral("to"));
+  writeFile(QDir(from).filePath(QStringLiteral("bin/held.dll")));
+  QFile held(QDir(from).filePath(QStringLiteral("bin/held.dll")));
+  ASSERT_TRUE(held.open(QIODevice::ReadOnly));
+  std::thread release([&held]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    held.close();
+  });
+  int attempts = 0;
+  const bool renamed = StudioUpdater::renameDirectory(from, to, 10000, &attempts);
+  release.join();
+  EXPECT_TRUE(renamed);
+  EXPECT_GT(attempts, 1);
+  EXPECT_TRUE(QFileInfo::exists(QDir(to).filePath(QStringLiteral("bin/held.dll"))));
+}
+
+TEST(UpdaterRename, DoesNotRetryOntoAnExistingDirectory)
+{
+  QTemporaryDir temporary;
+  const QString from = temporary.filePath(QStringLiteral("from"));
+  const QString to = temporary.filePath(QStringLiteral("to"));
+  writeFile(QDir(from).filePath(QStringLiteral("a.txt")));
+  writeFile(QDir(to).filePath(QStringLiteral("b.txt")));
+  int attempts = 0;
+  EXPECT_FALSE(StudioUpdater::renameDirectory(from, to, 10000, &attempts));
+  EXPECT_EQ(attempts, 1);
+}
+
+TEST(UpdaterRuntime, CopiesListedDllsNextToTheUpdater)
+{
+  QTemporaryDir temporary;
+  const QString bin = temporary.filePath(QStringLiteral("bin"));
+  const QString updater = QDir(bin).filePath(QStringLiteral("updater"));
+  const QString destination = temporary.filePath(QStringLiteral("run"));
+  writeFile(QDir(updater).filePath(QStringLiteral("RosPlotJugglerUpdater.exe")));
+  writeFile(QDir(updater).filePath(QStringLiteral("extract-update.ps1")));
+  writeFile(QDir(bin).filePath(QStringLiteral("Qt5Core.dll")));
+  writeFile(QDir(bin).filePath(QStringLiteral("libstdc++-6.dll")));
+  writeFile(QDir(updater).filePath(QStringLiteral("runtime-dlls.txt")),
+            QByteArray("Qt5Core.dll\r\nlibstdc++-6.dll\r\n\r\n"));
+  ASSERT_TRUE(QDir().mkpath(destination));
+
+  QString error;
+  ASSERT_TRUE(StudioUpdater::stageUpdaterRuntime(updater, bin, destination, &error))
+      << qPrintable(error);
+  for (const char* name : { "RosPlotJugglerUpdater.exe", "extract-update.ps1", "Qt5Core.dll",
+                            "libstdc++-6.dll" })
+  {
+    EXPECT_TRUE(QFileInfo::exists(QDir(destination).filePath(QString::fromLatin1(name)))) << name;
+  }
+}
+
+TEST(UpdaterRuntime, RejectsEntriesThatAreNotPackagedDllNames)
+{
+  QTemporaryDir temporary;
+  const QString bin = temporary.filePath(QStringLiteral("bin"));
+  const QString updater = QDir(bin).filePath(QStringLiteral("updater"));
+  writeFile(QDir(updater).filePath(QStringLiteral("RosPlotJugglerUpdater.exe")));
+  writeFile(QDir(updater).filePath(QStringLiteral("extract-update.ps1")));
+  writeFile(temporary.filePath(QStringLiteral("secret.dll")));
+
+  for (const QByteArray& list : { QByteArray("..\\secret.dll\n"), QByteArray("missing.dll\n") })
+  {
+    writeFile(QDir(updater).filePath(QStringLiteral("runtime-dlls.txt")), list);
+    const QString destination = temporary.filePath(QStringLiteral("run-") + QString::fromLatin1(list.left(3).toHex()));
+    ASSERT_TRUE(QDir().mkpath(destination));
+    EXPECT_FALSE(StudioUpdater::stageUpdaterRuntime(updater, bin, destination)) << list.constData();
+    EXPECT_FALSE(QFileInfo::exists(QDir(destination).filePath(QStringLiteral("secret.dll"))));
+  }
 }

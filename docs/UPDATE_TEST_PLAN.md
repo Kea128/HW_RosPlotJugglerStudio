@@ -22,8 +22,12 @@
   - 健康新版从 `1.0.0` 切换到 `2.0.0` 并重启新版；
   - 父进程在 updater 打开句柄前已退出时仍完成更新（旧实现返回 7）；
   - 新版健康检查失败时 updater 返回 14、恢复 `1.0.0` 并重启旧版；
-  - staging、backup、failed 临时目录清理；
+  - staging、backup、failed 临时目录清理，以及 3.17.10 之前 updater 遗留的
+    backup 目录在下次更新时被删除；
+  - 另一个进程占用旧版本文件时，目录替换 rename 会重试并在释放后完成；
   - 位于安装树之外的配置文件 SHA-256 不变。
+- updater 逻辑单测：工作目录短名、新旧命名只匹配同一安装根、遗留目录清理不触碰
+  安装根和其他目录、文件被打开时 rename 重试、`runtime-dlls.txt` 复制与非法条目拒绝。
 - ROS1：`generate_numeric_ros1_sample.py` 生成确定性的 Float64 和 String fixture；
   packaged Python worker 实际读取 bag，确认输出包含 `N`、`S` 和
   `DONE	1005	1005`。`RosbagRecordParser` 的 numeric、string、metadata 和非法
@@ -107,5 +111,7 @@ $env:PYTHONPATH = Join-Path $Bin runtime\rosbag_python
   当前权限测试是确定性的不可写父目录模拟，不等同于真实 ACL 验收。
 - 安装树内部用户文件的迁移策略。本次仅验证应用实际采用的外置配置不受原子目录
   替换和回滚影响，没有宣称任意放入安装目录的配置会保留。
-- 发布签名、安装器升级、真实 345 MB 包 E2E；本次 E2E 使用真实目录结构和 updater，
-  但用最小 helper 避免复制完整便携包。
+- 发布签名、安装器升级；自动 E2E 使用真实目录结构和 updater，但用最小 helper
+  避免复制完整便携包。3.17.10 发布前手动用真实便携包模拟了主程序启动 updater 的
+  流程：72 字符上级目录下新流程更新成功且无遗留；58 字符上级目录下 3.17.9 的
+  updater 更新到 3.17.10 成功（会留下其旧版 DLL，由下次更新清理）。
